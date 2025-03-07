@@ -45,6 +45,7 @@ static char *string(int n, const char *fmt, ...)
 
 enum {
   PREF_CURSOR_MODE,
+  PREF_SHADE_BY_GROUP_SIZES,
   N_PREF_ITEMS
 };
 
@@ -880,6 +881,7 @@ struct game_ui {
     bool show;
 
     bool legacy_cursor;
+    bool shade_by_group_sizes;
 };
 
 static game_ui *new_ui(const game_state *state)
@@ -888,6 +890,7 @@ static game_ui *new_ui(const game_state *state)
     ui->x = ui->y = 1;
     ui->show = getenv_bool("PUZZLES_SHOW_CURSOR", false);
     ui->legacy_cursor = false;
+    ui->shade_by_group_sizes = true;
     return ui;
 }
 
@@ -904,6 +907,11 @@ static config_item *get_prefs(game_ui *ui)
     cfg[PREF_CURSOR_MODE].u.choices.choicekws = ":half:full";
     cfg[PREF_CURSOR_MODE].u.choices.selected = ui->legacy_cursor;
 
+    cfg[PREF_SHADE_BY_GROUP_SIZES].name = "Shade by group sizes";
+    cfg[PREF_SHADE_BY_GROUP_SIZES].kw = "shade-by-group-sizes";
+    cfg[PREF_SHADE_BY_GROUP_SIZES].type = C_BOOLEAN;
+    cfg[PREF_SHADE_BY_GROUP_SIZES].u.boolean.bval = ui->shade_by_group_sizes;
+
     cfg[N_PREF_ITEMS].name = NULL;
     cfg[N_PREF_ITEMS].type = C_END;
 
@@ -913,6 +921,7 @@ static config_item *get_prefs(game_ui *ui)
 static void set_prefs(game_ui *ui, const config_item *cfg)
 {
     ui->legacy_cursor = cfg[PREF_CURSOR_MODE].u.choices.selected;
+    ui->shade_by_group_sizes = cfg[PREF_SHADE_BY_GROUP_SIZES].u.boolean.bval;
 }
 
 static void free_ui(game_ui *ui)
