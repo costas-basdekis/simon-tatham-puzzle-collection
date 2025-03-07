@@ -939,6 +939,8 @@ typedef int dsflags;
 struct game_drawstate {
     int tilesize;
     dsflags *grid;
+    int k;
+    float *group_colour_indexes;
 };
 
 #define TILESIZE (ds->tilesize)
@@ -1174,6 +1176,40 @@ enum {
     NCOLOURS
 };
 
+/*
+    We only define 10 colours, as this will be the most common max region size.
+    If the region size is smaller, then we use less colours.
+    If the region size is bigger, then we re-use colours for different group
+    sizes.
+    Ideally we'd be able to interpolate as many colours necessary, but we have
+    to statically define all the usable colours.
+*/
+#define MIN_GROUP_COLOUR_SIZE 2
+#define HALF_GROUP_COLOUR_COUNT 5
+#define GROUP_COLOUR_COUNT 10
+#define MIN_GROUP_COLOUR_INDEX COL_GROUP_2
+#define MAX_GROUP_COLOUR_INDEX COL_GROUP_10
+/*
+    This is basic interpolation, where if we have to use 1 colour for the lower
+    or upper half of the range, we use the deepest one, rather than the lighest
+    one.
+*/
+#define GROUP_COLOUR_INDEX(input_range_start, input_range_end, group_size, output_range_start, output_range_end) \
+    (( \
+        (input_range_start) == (input_range_end) ? \
+            (output_range_end) - (output_range_start) \
+            : (((group_size) - (input_range_start)) * ((output_range_end) - (output_range_start)) / ((input_range_end) - (input_range_start))) \
+    ) + (output_range_start) + MIN_GROUP_COLOUR_INDEX - MIN_GROUP_COLOUR_SIZE)
+/* We shade from group size 2 until half-size (or less) */
+#define LOWER_COLOUR_GROUP_INDEX(k, group_size) \
+    GROUP_COLOUR_INDEX(MIN_GROUP_COLOUR_SIZE, (k) / 2, group_size, MIN_GROUP_COLOUR_SIZE, HALF_GROUP_COLOUR_COUNT)
+/*
+    We shade from group size half-size + 1, until region size - 1. Region size
+    colour is white.
+*/
+#define HIGHER_COLOUR_GROUP_INDEX(k, group_size) \
+    GROUP_COLOUR_INDEX((k) / 2 + 1, (k) - 1, group_size, HALF_GROUP_COLOUR_COUNT + 1, GROUP_COLOUR_COUNT - 1)
+
 #define COLOUR(i, r, g, b) \
    ((ret[3*(i)+0] = (r)), (ret[3*(i)+1] = (g)), (ret[3*(i)+2] = (b)))
 #define COLOUR255(i, r, g, b) COLOUR(i, r / 255.0F, g / 255.0F, b / 255.0F)
@@ -1228,6 +1264,8 @@ static game_drawstate *game_new_drawstate(drawing *dr, const game_state *state)
 
     ds->tilesize = 0;
     ds->grid = NULL;
+    ds->k = 0;
+    ds->group_colour_indexes = NULL;
 
     return ds;
 }
@@ -1235,6 +1273,8 @@ static game_drawstate *game_new_drawstate(drawing *dr, const game_state *state)
 static void game_free_drawstate(drawing *dr, game_drawstate *ds)
 {
     sfree(ds->grid);
+    ds->k = 0;
+    sfree(ds->group_colour_indexes);
     sfree(ds);
 }
 
@@ -1345,6 +1385,26 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
 
         sprintf(buf, "Region size: %d", state->shared->params.k);
         status_bar(dr, buf);
+    }
+    /* Assign the group colours, for quick reference during drawing */
+    if (!ds->group_colour_indexes) {
+        int start_lower[3] = {199, 233, 192};
+        int end_lower[3] = {65, 171, 93};
+        int start_higher[3] = {158, 202, 225};
+        int end_higher[3] = {8, 81, 156};
+        ds->k = k;
+        snewa(ds->group_colour_indexes, k + 1);
+        setmem(ds->group_colour_indexes, 0, k + 1);
+        ds->group_colour_indexes[0] = 0.0f;
+        ds->group_colour_indexes[1] = 0.0f;
+        ds->group_colour_indexes[k] = 1.0f * MAX_GROUP_COLOUR_INDEX;
+        int half_k = k / 2;
+        for (int group_size = 2 ; group_size <= half_k ; group_size++) {
+            ds->group_colour_indexes[group_size] = LOWER_COLOUR_GROUP_INDEX(k, group_size);
+        }
+        for (int group_size = half_k + 1 ; group_size <= k - 1 ; group_size++) {
+            ds->group_colour_indexes[group_size] = HIGHER_COLOUR_GROUP_INDEX(k, group_size);
+        }
     }
 
     build_dsf(w, h, state->borders, black_border_dsf, true);
