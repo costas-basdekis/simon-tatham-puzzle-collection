@@ -45,6 +45,7 @@ static char *string(int n, const char *fmt, ...)
 
 enum {
   PREF_CURSOR_MODE,
+  PREF_SHADE_BY_GROUP_SIZES,
   N_PREF_ITEMS
 };
 
@@ -880,6 +881,7 @@ struct game_ui {
     bool show;
 
     bool legacy_cursor;
+    bool shade_by_group_sizes;
 };
 
 static game_ui *new_ui(const game_state *state)
@@ -888,6 +890,7 @@ static game_ui *new_ui(const game_state *state)
     ui->x = ui->y = 1;
     ui->show = getenv_bool("PUZZLES_SHOW_CURSOR", false);
     ui->legacy_cursor = false;
+    ui->shade_by_group_sizes = true;
     return ui;
 }
 
@@ -904,6 +907,11 @@ static config_item *get_prefs(game_ui *ui)
     cfg[PREF_CURSOR_MODE].u.choices.choicekws = ":half:full";
     cfg[PREF_CURSOR_MODE].u.choices.selected = ui->legacy_cursor;
 
+    cfg[PREF_SHADE_BY_GROUP_SIZES].name = "Shade by group sizes";
+    cfg[PREF_SHADE_BY_GROUP_SIZES].kw = "shade-by-group-sizes";
+    cfg[PREF_SHADE_BY_GROUP_SIZES].type = C_BOOLEAN;
+    cfg[PREF_SHADE_BY_GROUP_SIZES].u.boolean.bval = ui->shade_by_group_sizes;
+
     cfg[N_PREF_ITEMS].name = NULL;
     cfg[N_PREF_ITEMS].type = C_END;
 
@@ -913,6 +921,7 @@ static config_item *get_prefs(game_ui *ui)
 static void set_prefs(game_ui *ui, const config_item *cfg)
 {
     ui->legacy_cursor = cfg[PREF_CURSOR_MODE].u.choices.selected;
+    ui->shade_by_group_sizes = cfg[PREF_SHADE_BY_GROUP_SIZES].u.boolean.bval;
 }
 
 static void free_ui(game_ui *ui)
@@ -925,11 +934,19 @@ static void game_changed_state(game_ui *ui, const game_state *oldstate,
 {
 }
 
+typedef struct group_info {
+    int size;
+} group_info;
+
 typedef int dsflags;
 
 struct game_drawstate {
     int tilesize;
     dsflags *grid;
+    int k;
+    float *group_colour_indexes;
+    group_info **cell_groups; /* length w*h */
+    int *group_size;
 };
 
 #define TILESIZE (ds->tilesize)
@@ -1152,12 +1169,56 @@ enum {
     COL_LINE_MAYBE,
     COL_LINE_NO,
     COL_ERROR,
+    COL_GROUP_2,
+    COL_GROUP_3,
+    COL_GROUP_4,
+    COL_GROUP_5,
+    COL_GROUP_6,
+    COL_GROUP_7,
+    COL_GROUP_8,
+    COL_GROUP_9,
+    COL_GROUP_10,
 
     NCOLOURS
 };
 
+/*
+    We only define 10 colours, as this will be the most common max region size.
+    If the region size is smaller, then we use less colours.
+    If the region size is bigger, then we re-use colours for different group
+    sizes.
+    Ideally we'd be able to interpolate as many colours necessary, but we have
+    to statically define all the usable colours.
+*/
+#define MIN_GROUP_COLOUR_SIZE 2
+#define HALF_GROUP_COLOUR_COUNT 5
+#define GROUP_COLOUR_COUNT 10
+#define MIN_GROUP_COLOUR_INDEX COL_GROUP_2
+#define MAX_GROUP_COLOUR_INDEX COL_GROUP_10
+/*
+    This is basic interpolation, where if we have to use 1 colour for the lower
+    or upper half of the range, we use the deepest one, rather than the lighest
+    one.
+*/
+#define GROUP_COLOUR_INDEX(input_range_start, input_range_end, group_size, output_range_start, output_range_end) \
+    (( \
+        (input_range_start) == (input_range_end) ? \
+            (output_range_end) - (output_range_start) \
+            : (((group_size) - (input_range_start)) * ((output_range_end) - (output_range_start)) / ((input_range_end) - (input_range_start))) \
+    ) + (output_range_start) + MIN_GROUP_COLOUR_INDEX - MIN_GROUP_COLOUR_SIZE)
+/* We shade from group size 2 until half-size (or less) */
+#define LOWER_COLOUR_GROUP_INDEX(k, group_size) \
+    GROUP_COLOUR_INDEX(MIN_GROUP_COLOUR_SIZE, (k) / 2, group_size, MIN_GROUP_COLOUR_SIZE, HALF_GROUP_COLOUR_COUNT)
+/*
+    We shade from group size half-size + 1, until region size - 1. Region size
+    colour is white.
+*/
+#define HIGHER_COLOUR_GROUP_INDEX(k, group_size) \
+    GROUP_COLOUR_INDEX((k) / 2 + 1, (k) - 1, group_size, HALF_GROUP_COLOUR_COUNT + 1, GROUP_COLOUR_COUNT - 1)
+
 #define COLOUR(i, r, g, b) \
    ((ret[3*(i)+0] = (r)), (ret[3*(i)+1] = (g)), (ret[3*(i)+2] = (b)))
+#define COLOUR255(i, r, g, b) COLOUR(i, r / 255.0F, g / 255.0F, b / 255.0F)
 #define DARKER 0.9F
 
 static float *game_colours(frontend *fe, int *ncolours)
@@ -1179,6 +1240,16 @@ static float *game_colours(frontend *fe, int *ncolours)
            ret[COL_BACKGROUND*3 + 1] * DARKER,
            ret[COL_BACKGROUND*3 + 2] * DARKER);
 
+    COLOUR255(COL_GROUP_2, 199, 233, 192);
+    COLOUR255(COL_GROUP_3, 161, 217, 155);
+    COLOUR255(COL_GROUP_4, 116, 196, 118);
+    COLOUR255(COL_GROUP_5, 65, 171, 93);
+    COLOUR255(COL_GROUP_6, 158, 202, 225);
+    COLOUR255(COL_GROUP_7, 107, 174, 214);
+    COLOUR255(COL_GROUP_8, 49, 130, 189);
+    COLOUR255(COL_GROUP_9, 8, 81, 156);
+    COLOUR(COL_GROUP_10, 1.0F, 1.0F, 1.0F);
+
     *ncolours = NCOLOURS;
     return ret;
 }
@@ -1199,6 +1270,10 @@ static game_drawstate *game_new_drawstate(drawing *dr, const game_state *state)
 
     ds->tilesize = 0;
     ds->grid = NULL;
+    ds->k = 0;
+    ds->group_colour_indexes = NULL;
+    ds->cell_groups = NULL;
+    ds->group_size = NULL;
 
     return ds;
 }
@@ -1206,7 +1281,108 @@ static game_drawstate *game_new_drawstate(drawing *dr, const game_state *state)
 static void game_free_drawstate(drawing *dr, game_drawstate *ds)
 {
     sfree(ds->grid);
+    ds->k = 0;
+    sfree(ds->group_colour_indexes);
+    sfree(ds->cell_groups);
+    sfree(ds->group_size);
     sfree(ds);
+}
+
+/* Generic queue structure for flooding groups of tiles */
+typedef struct flood_queue_item *flood_queue_item_t;
+typedef struct flood_queue_item {
+    flood_queue_item_t next;
+    int position_i;
+} flood_queue_item;
+typedef struct flood_queue {
+    flood_queue_item *start;
+    flood_queue_item *end;
+} flood_queue;
+
+static void add_to_flood_queue_end(flood_queue *queue, int position_i)
+{
+    flood_queue_item *new_end = snew(struct flood_queue_item);
+    new_end->next = NULL;
+    new_end->position_i = position_i;
+    if (queue->end) {
+        queue->end->next = new_end;
+        queue->end = new_end;
+    } else {
+        queue->start = queue->end = new_end;
+    }
+}
+
+static void remove_from_flood_queue_start(flood_queue *queue)
+{
+    flood_queue_item *next_start = queue->start->next;
+    sfree(queue->start);
+    queue->start = next_start;
+    if (!next_start) {
+        queue->end = NULL;
+    }
+}
+
+/*
+    Flood all connected tiles, starting from position_i. If clear == true, then
+    clear all tiles with the same group as that of position_i, otherwise assign
+    a new group to all neighbouring connected tiles, as long as they're not
+    assigned a group already. (It is a bug to have connected tiles be assigned
+    different groups)
+*/
+static group_info *flood_group(const game_state *state, game_drawstate *ds, int position_i, bool clear) {
+    #define ASSIGNED(position ) \
+        (clear ? (ds->cell_groups[(position)] == NULL) : (ds->cell_groups[(position)] != NULL))
+    if (ASSIGNED(position_i)) {
+        return ds->cell_groups[position_i];
+    }
+    group_info *group;
+    if (clear) {
+        group = ds->cell_groups[position_i];
+    } else {
+        group = snew(struct group_info);
+        group->size = 0;
+    }
+    flood_queue queue = {NULL, NULL};
+    add_to_flood_queue_end(&queue, position_i);
+    int w = state->shared->params.w;
+    while (queue.start) {
+        int current_position_i = queue.start->position_i;
+        remove_from_flood_queue_start(&queue);
+        if (ASSIGNED(current_position_i)) {
+            continue;
+        }
+        if (!clear) {
+            group->size++;
+        }
+        ds->cell_groups[current_position_i] = clear ? NULL : group;
+        // TODO: Should we define a DECOMPOSE_POSITION macro?
+        int c = current_position_i % w;
+        int r = (current_position_i - c) / w;
+        if (state->borders[current_position_i] & DISABLED(BORDER_U)) {
+            // TODO: Should we define a POSITION macro?
+            int new_c = c, new_r = r - 1, new_position_i = new_r * w + new_c;
+            add_to_flood_queue_end(&queue, new_position_i);
+        }
+        if (state->borders[current_position_i] & DISABLED(BORDER_D)) {
+            int new_c = c, new_r = r + 1, new_position_i = new_r * w + new_c;
+            add_to_flood_queue_end(&queue, new_position_i);
+        }
+        if (state->borders[current_position_i] & DISABLED(BORDER_L)) {
+            int new_c = c - 1, new_r = r, new_position_i = new_r * w + new_c;
+            add_to_flood_queue_end(&queue, new_position_i);
+        }
+        if (state->borders[current_position_i] & DISABLED(BORDER_R)) {
+            int new_c = c + 1, new_r = r, new_position_i = new_r * w + new_c;
+            add_to_flood_queue_end(&queue, new_position_i);
+        }
+    }
+    return clear ? NULL : group;
+    #undef ASSIGNED
+}
+
+static int get_group_size(const game_state *state, game_drawstate *ds, int position_i)
+{
+    return flood_group(state, ds, position_i, false)->size;
 }
 
 #define COLOUR(border)                                                  \
@@ -1216,7 +1392,7 @@ static void game_free_drawstate(drawing *dr, game_drawstate *ds)
                                       COL_LINE_MAYBE)
 
 static void draw_tile(drawing *dr, game_drawstate *ds, int r, int c,
-                      dsflags flags, int clue)
+                      dsflags flags, int clue, int group_size)
 {
     int x = MARGIN + TILESIZE * c, y = MARGIN + TILESIZE * r;
 
@@ -1224,6 +1400,39 @@ static void draw_tile(drawing *dr, game_drawstate *ds, int r, int c,
 
     draw_rect(dr, x + WIDTH, y + WIDTH, TILESIZE - WIDTH, TILESIZE - WIDTH,
               (flags & F_FLASH ? COL_FLASH : COL_BACKGROUND));
+
+#define ts TILESIZE
+#define w WIDTH
+    draw_rect(dr, x + w,  y,      ts - w, w,      COLOUR(BORDER_U));
+    draw_rect(dr, x + ts, y + w,  w,      ts - w, COLOUR(BORDER_R));
+    draw_rect(dr, x + w,  y + ts, ts - w, w,      COLOUR(BORDER_D));
+    draw_rect(dr, x,      y + w,  w,      ts - w, COLOUR(BORDER_L));
+
+/* B is the space between the border and the group size */
+#define B 5
+    if (group_size >= 2 && group_size <= ds->k) {
+        bool hasUp = flags & DISABLED(BORDER_U);
+        bool hasDown = flags & DISABLED(BORDER_D);
+        bool hasLeft = flags & DISABLED(BORDER_L);
+        bool hasRight = flags & DISABLED(BORDER_R);
+        float colour = ds->group_colour_indexes[group_size];
+        draw_rect(dr, x + w + B, y + w + B, ts - w - B * 2, ts - w - B * 2, colour);
+        if (hasUp) {
+            draw_rect(dr, x + w + B, y, ts - w - B * 2, w + B, colour);
+        }
+        if (hasDown) {
+            draw_rect(dr, x + w + B, y + ts - B, ts - w - B * 2, w + B, colour);
+        }
+        if (hasLeft) {
+            draw_rect(dr, x, y + w + B, w + B, ts - w - B * 2, colour);
+        }
+        if (hasRight) {
+            draw_rect(dr, x + ts - B, y + w + B, w + B, ts - w - B * 2, colour);
+        }
+    }
+#undef B
+#undef ts
+#undef w
 
     if (clue != EMPTY) {
         char buf[2];
@@ -1233,16 +1442,6 @@ static void draw_tile(drawing *dr, game_drawstate *ds, int r, int c,
                   TILESIZE / 2, ALIGN_VCENTRE | ALIGN_HCENTRE,
                   (flags & F_ERROR_CLUE ? COL_ERROR : COL_CLUE), buf);
     }
-
-
-#define ts TILESIZE
-#define w WIDTH
-    draw_rect(dr, x + w,  y,      ts - w, w,      COLOUR(BORDER_U));
-    draw_rect(dr, x + ts, y + w,  w,      ts - w, COLOUR(BORDER_R));
-    draw_rect(dr, x + w,  y + ts, ts - w, w,      COLOUR(BORDER_D));
-    draw_rect(dr, x,      y + w,  w,      ts - w, COLOUR(BORDER_L));
-#undef ts
-#undef w
 
     unclip(dr); /* } */
     draw_update(dr, x, y, TILESIZE + WIDTH, TILESIZE + WIDTH);
@@ -1317,10 +1516,46 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
         sprintf(buf, "Region size: %d", state->shared->params.k);
         status_bar(dr, buf);
     }
+    /* Assign the group colours, for quick reference during drawing */
+    if (!ds->group_colour_indexes) {
+        int start_lower[3] = {199, 233, 192};
+        int end_lower[3] = {65, 171, 93};
+        int start_higher[3] = {158, 202, 225};
+        int end_higher[3] = {8, 81, 156};
+        ds->k = k;
+        snewa(ds->group_colour_indexes, k + 1);
+        setmem(ds->group_colour_indexes, 0, k + 1);
+        ds->group_colour_indexes[0] = 0.0f;
+        ds->group_colour_indexes[1] = 0.0f;
+        ds->group_colour_indexes[k] = 1.0f * MAX_GROUP_COLOUR_INDEX;
+        int half_k = k / 2;
+        for (int group_size = 2 ; group_size <= half_k ; group_size++) {
+            ds->group_colour_indexes[group_size] = LOWER_COLOUR_GROUP_INDEX(k, group_size);
+        }
+        for (int group_size = half_k + 1 ; group_size <= k - 1 ; group_size++) {
+            ds->group_colour_indexes[group_size] = HIGHER_COLOUR_GROUP_INDEX(k, group_size);
+        }
+    }
+    if (!ds->cell_groups) {
+        snewa(ds->cell_groups, wh);
+        setmem(ds->cell_groups, 0, wh);
+    }
+    if (!ds->group_size) {
+        snewa(ds->group_size, wh);
+        setmem(ds->group_size, 0, wh);
+    }
 
     build_dsf(w, h, state->borders, black_border_dsf, true);
     build_dsf(w, h, state->borders, yellow_border_dsf, false);
 
+    /*
+        Do 2 passes: first figure what tiles borders have changed, and update
+        the groups, and then draw the tiles.
+        The reason is that a tile might not have changed borders, but they might
+        have changed groups due to another tile changing borders.
+    */
+    dsflags *new_flags = dupmem(ds->grid, wh);
+    /* Border & group checking phase */
     for (r = 0; r < h; ++r)
         for (c = 0; c < w; ++c) {
             int i = r * w + c, clue = state->shared->clues[i], flags, dir;
@@ -1378,10 +1613,34 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
 
                     flags |= BORDER_ERROR(BORDER(dir));
             }
+            new_flags[i] = flags;
+            if (flags != ds->grid[i]) {
+                flood_group(state, ds, i, true);
+                if (r + 1 < h) {
+                    flood_group(state, ds, (r + 1)*w + c, true);
+                }
+                if (r - 1 >= 0) {
+                    flood_group(state, ds, (r - 1)*w + c, true);
+                }
+                if (c + 1 < w) {
+                    flood_group(state, ds, r*w + (c + 1), true);
+                }
+                if (c - 1 >= 0) {
+                    flood_group(state, ds, r*w + (c - 1), true);
+                }
+            }
+        }
 
-            if (flags == ds->grid[i]) continue;
+    /* Redrawing phase if the borders and/or group changed */
+    for (r = 0; r < h; ++r)
+        for (c = 0; c < w; ++c) {
+            int i = r * w + c, clue = state->shared->clues[i], flags = new_flags[i];
+
+            int group_size = ui->shade_by_group_sizes ? get_group_size(state, ds, i) : 0;
+            if (flags == ds->grid[i] && group_size == ds->group_size[i]) continue;
             ds->grid[i] = flags;
-            draw_tile(dr, ds, r, c, ds->grid[i], clue);
+            ds->group_size[i] = group_size;
+            draw_tile(dr, ds, r, c, ds->grid[i], clue, group_size);
         }
 
     if (ui->show)
