@@ -1392,7 +1392,7 @@ static int get_group_size(const game_state *state, game_drawstate *ds, int posit
                                       COL_LINE_MAYBE)
 
 static void draw_tile(drawing *dr, game_drawstate *ds, int r, int c,
-                      dsflags flags, int clue)
+                      dsflags flags, int clue, int group_size)
 {
     int x = MARGIN + TILESIZE * c, y = MARGIN + TILESIZE * r;
 
@@ -1400,6 +1400,39 @@ static void draw_tile(drawing *dr, game_drawstate *ds, int r, int c,
 
     draw_rect(dr, x + WIDTH, y + WIDTH, TILESIZE - WIDTH, TILESIZE - WIDTH,
               (flags & F_FLASH ? COL_FLASH : COL_BACKGROUND));
+
+#define ts TILESIZE
+#define w WIDTH
+    draw_rect(dr, x + w,  y,      ts - w, w,      COLOUR(BORDER_U));
+    draw_rect(dr, x + ts, y + w,  w,      ts - w, COLOUR(BORDER_R));
+    draw_rect(dr, x + w,  y + ts, ts - w, w,      COLOUR(BORDER_D));
+    draw_rect(dr, x,      y + w,  w,      ts - w, COLOUR(BORDER_L));
+
+/* B is the space between the border and the group size */
+#define B 5
+    if (group_size >= 2 && group_size <= ds->k) {
+        bool hasUp = flags & DISABLED(BORDER_U);
+        bool hasDown = flags & DISABLED(BORDER_D);
+        bool hasLeft = flags & DISABLED(BORDER_L);
+        bool hasRight = flags & DISABLED(BORDER_R);
+        float colour = ds->group_colour_indexes[group_size];
+        draw_rect(dr, x + w + B, y + w + B, ts - w - B * 2, ts - w - B * 2, colour);
+        if (hasUp) {
+            draw_rect(dr, x + w + B, y, ts - w - B * 2, w + B, colour);
+        }
+        if (hasDown) {
+            draw_rect(dr, x + w + B, y + ts - B, ts - w - B * 2, w + B, colour);
+        }
+        if (hasLeft) {
+            draw_rect(dr, x, y + w + B, w + B, ts - w - B * 2, colour);
+        }
+        if (hasRight) {
+            draw_rect(dr, x + ts - B, y + w + B, w + B, ts - w - B * 2, colour);
+        }
+    }
+#undef B
+#undef ts
+#undef w
 
     if (clue != EMPTY) {
         char buf[2];
@@ -1409,16 +1442,6 @@ static void draw_tile(drawing *dr, game_drawstate *ds, int r, int c,
                   TILESIZE / 2, ALIGN_VCENTRE | ALIGN_HCENTRE,
                   (flags & F_ERROR_CLUE ? COL_ERROR : COL_CLUE), buf);
     }
-
-
-#define ts TILESIZE
-#define w WIDTH
-    draw_rect(dr, x + w,  y,      ts - w, w,      COLOUR(BORDER_U));
-    draw_rect(dr, x + ts, y + w,  w,      ts - w, COLOUR(BORDER_R));
-    draw_rect(dr, x + w,  y + ts, ts - w, w,      COLOUR(BORDER_D));
-    draw_rect(dr, x,      y + w,  w,      ts - w, COLOUR(BORDER_L));
-#undef ts
-#undef w
 
     unclip(dr); /* } */
     draw_update(dr, x, y, TILESIZE + WIDTH, TILESIZE + WIDTH);
@@ -1617,7 +1640,7 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
             if (flags == ds->grid[i] && group_size == ds->group_size[i]) continue;
             ds->grid[i] = flags;
             ds->group_size[i] = group_size;
-            draw_tile(dr, ds, r, c, ds->grid[i], clue);
+            draw_tile(dr, ds, r, c, ds->grid[i], clue, group_size);
         }
 
     if (ui->show)
