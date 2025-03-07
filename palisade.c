@@ -1161,12 +1161,22 @@ enum {
     COL_LINE_MAYBE,
     COL_LINE_NO,
     COL_ERROR,
+    COL_GROUP_2,
+    COL_GROUP_3,
+    COL_GROUP_4,
+    COL_GROUP_5,
+    COL_GROUP_6,
+    COL_GROUP_7,
+    COL_GROUP_8,
+    COL_GROUP_9,
+    COL_GROUP_10,
 
     NCOLOURS
 };
 
 #define COLOUR(i, r, g, b) \
    ((ret[3*(i)+0] = (r)), (ret[3*(i)+1] = (g)), (ret[3*(i)+2] = (b)))
+#define COLOUR255(i, r, g, b) COLOUR(i, r / 255.0F, g / 255.0F, b / 255.0F)
 #define DARKER 0.9F
 
 static float *game_colours(frontend *fe, int *ncolours)
@@ -1187,6 +1197,16 @@ static float *game_colours(frontend *fe, int *ncolours)
            ret[COL_BACKGROUND*3 + 0] * DARKER,
            ret[COL_BACKGROUND*3 + 1] * DARKER,
            ret[COL_BACKGROUND*3 + 2] * DARKER);
+
+    COLOUR255(COL_GROUP_2, 199, 233, 192);
+    COLOUR255(COL_GROUP_3, 161, 217, 155);
+    COLOUR255(COL_GROUP_4, 116, 196, 118);
+    COLOUR255(COL_GROUP_5, 65, 171, 93);
+    COLOUR255(COL_GROUP_6, 158, 202, 225);
+    COLOUR255(COL_GROUP_7, 107, 174, 214);
+    COLOUR255(COL_GROUP_8, 49, 130, 189);
+    COLOUR255(COL_GROUP_9, 8, 81, 156);
+    COLOUR(COL_GROUP_10, 1.0F, 1.0F, 1.0F);
 
     *ncolours = NCOLOURS;
     return ret;
