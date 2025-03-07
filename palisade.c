@@ -934,6 +934,10 @@ static void game_changed_state(game_ui *ui, const game_state *oldstate,
 {
 }
 
+typedef struct group_info {
+    int size;
+} group_info;
+
 typedef int dsflags;
 
 struct game_drawstate {
@@ -941,6 +945,8 @@ struct game_drawstate {
     dsflags *grid;
     int k;
     float *group_colour_indexes;
+    group_info **cell_groups; /* length w*h */
+    int *group_size;
 };
 
 #define TILESIZE (ds->tilesize)
@@ -1266,6 +1272,8 @@ static game_drawstate *game_new_drawstate(drawing *dr, const game_state *state)
     ds->grid = NULL;
     ds->k = 0;
     ds->group_colour_indexes = NULL;
+    ds->cell_groups = NULL;
+    ds->group_size = NULL;
 
     return ds;
 }
@@ -1275,6 +1283,8 @@ static void game_free_drawstate(drawing *dr, game_drawstate *ds)
     sfree(ds->grid);
     ds->k = 0;
     sfree(ds->group_colour_indexes);
+    sfree(ds->cell_groups);
+    sfree(ds->group_size);
     sfree(ds);
 }
 
@@ -1405,6 +1415,14 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
         for (int group_size = half_k + 1 ; group_size <= k - 1 ; group_size++) {
             ds->group_colour_indexes[group_size] = HIGHER_COLOUR_GROUP_INDEX(k, group_size);
         }
+    }
+    if (!ds->cell_groups) {
+        snewa(ds->cell_groups, wh);
+        setmem(ds->cell_groups, 0, wh);
+    }
+    if (!ds->group_size) {
+        snewa(ds->group_size, wh);
+        setmem(ds->group_size, 0, wh);
     }
 
     build_dsf(w, h, state->borders, black_border_dsf, true);
