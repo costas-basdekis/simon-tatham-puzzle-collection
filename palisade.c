@@ -1059,7 +1059,34 @@ static char *interpret_move(const game_state *state, game_ui *ui,
             return MOVE_UI_UPDATE;
         }
 
-        /* clicks on square corners and centers do nothing */
+        /* cursor selects on tiles toglle all undecided sides on or off */
+        if ((px == py) && (px == 1)) {
+            int changes = 0;
+            char *result = string(0, ""), *last_result = NULL;
+            int first, second;
+            for (int j = 0 ; j < 4 ; j++) {
+                if (!(state->borders[i] & BORDER(j)) && !(state->borders[i] & DISABLED(BORDER(j)))) {
+                    first = BORDER(j);
+                    second = BORDER(FLIP(j));
+                    if (button == CURSOR_SELECT2) {
+                        first = DISABLED(first);
+                        second = DISABLED(second);
+                    }
+
+                    changes++;
+                    last_result = result;
+                    result = string(changes * 20, "%sF%d,%d,%dF%d,%d,%d", result, gx, gy, first, gx + dx[j], gy + dy[j], second);
+                    sfree(last_result);
+                }
+            }
+            if (changes == 0) {
+                sfree(result);
+                return NULL;
+            }
+            return result;
+        }
+
+        /* clicks on square corners do nothing */
         if (px == py)
             return MOVE_NO_EFFECT;
 
