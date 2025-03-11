@@ -1083,6 +1083,56 @@ static char *interpret_move(const game_state *state, game_ui *ui,
                           gx, gy, DISABLED(BORDER(dir)),
                           hx, hy, DISABLED(BORDER(FLIP(dir))));
         }
+    } else if (button == 't' || button == 'T') {
+        /* if t/T is pressed, the border of the group is toggled on */
+        if(!ui->show) {
+            ui->show = true;
+            return MOVE_UI_UPDATE;
+        }
+
+        int px = ui->x % 2, py = ui->y % 2;
+        int gx = ui->x / 2, gy = ui->y / 2;
+        int i = gy * w + gx;
+
+        if (px != 1 || py != 1) {
+            return NULL;
+        }
+
+        DSF *dsf = dsf_new(w * h);
+        build_dsf(w, h, state->borders, dsf, false);
+
+        int changes = 0;
+        char *result = string(0, ""), *last_result = NULL;
+        int first, second;
+        for (int position = 0 ; position < w * h ; position++) {
+            int x = position % w;
+            int y = (position - x) / w;
+            if (!dsf_equivalent(dsf, i, position)) {
+                continue;
+            }
+            for (int j = 0 ; j < 4 ; j++) {
+                int neighbour_x = x + dx[j], neighbour_y = y + dy[j], neighbour_position = neighbour_y * w + neighbour_x;
+                if (!(state->borders[position] & BORDER(j)) && !(state->borders[position] & DISABLED(BORDER(j)))) {
+                    first = BORDER(j);
+                    second = BORDER(FLIP(j));
+                    changes++;
+                    last_result = result;
+                    if (dsf_equivalent(dsf, i, neighbour_position)) {
+                        first = DISABLED(first);
+                        result = string(changes * 20, "%sF%d,%d,%d", result, x, y, first);
+                    } else {
+                        result = string(changes * 20, "%sF%d,%d,%dF%d,%d,%d", result, x, y, first, neighbour_x, neighbour_y, second);
+                    }
+                    sfree(last_result);
+                }
+            }
+        }
+        dsf_free(dsf);
+        if (changes == 0) {
+            sfree(result);
+            return NULL;
+        }
+        return result;
     }
 
     return NULL;
