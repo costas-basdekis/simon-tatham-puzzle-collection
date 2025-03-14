@@ -934,10 +934,6 @@ static void game_changed_state(game_ui *ui, const game_state *oldstate,
 {
 }
 
-typedef struct group_info {
-    int size;
-} group_info;
-
 typedef int dsflags;
 
 struct game_drawstate {
@@ -945,7 +941,6 @@ struct game_drawstate {
     dsflags *grid;
     int k;
     float *group_colour_indexes;
-    group_info **cell_groups; /* length w*h */
     int *group_size;
 };
 
@@ -1299,7 +1294,6 @@ static game_drawstate *game_new_drawstate(drawing *dr, const game_state *state)
     ds->grid = NULL;
     ds->k = 0;
     ds->group_colour_indexes = NULL;
-    ds->cell_groups = NULL;
     ds->group_size = NULL;
 
     return ds;
@@ -1310,106 +1304,8 @@ static void game_free_drawstate(drawing *dr, game_drawstate *ds)
     sfree(ds->grid);
     ds->k = 0;
     sfree(ds->group_colour_indexes);
-    sfree(ds->cell_groups);
     sfree(ds->group_size);
     sfree(ds);
-}
-
-/* Generic queue structure for flooding groups of tiles */
-typedef struct flood_queue_item *flood_queue_item_t;
-typedef struct flood_queue_item {
-    flood_queue_item_t next;
-    int position_i;
-} flood_queue_item;
-typedef struct flood_queue {
-    flood_queue_item *start;
-    flood_queue_item *end;
-} flood_queue;
-
-static void add_to_flood_queue_end(flood_queue *queue, int position_i)
-{
-    flood_queue_item *new_end = snew(struct flood_queue_item);
-    new_end->next = NULL;
-    new_end->position_i = position_i;
-    if (queue->end) {
-        queue->end->next = new_end;
-        queue->end = new_end;
-    } else {
-        queue->start = queue->end = new_end;
-    }
-}
-
-static void remove_from_flood_queue_start(flood_queue *queue)
-{
-    flood_queue_item *next_start = queue->start->next;
-    sfree(queue->start);
-    queue->start = next_start;
-    if (!next_start) {
-        queue->end = NULL;
-    }
-}
-
-/*
-    Flood all connected tiles, starting from position_i. If clear == true, then
-    clear all tiles with the same group as that of position_i, otherwise assign
-    a new group to all neighbouring connected tiles, as long as they're not
-    assigned a group already. (It is a bug to have connected tiles be assigned
-    different groups)
-*/
-static group_info *flood_group(const game_state *state, game_drawstate *ds, int position_i, bool clear) {
-    #define ASSIGNED(position ) \
-        (clear ? (ds->cell_groups[(position)] == NULL) : (ds->cell_groups[(position)] != NULL))
-    if (ASSIGNED(position_i)) {
-        return ds->cell_groups[position_i];
-    }
-    group_info *group;
-    if (clear) {
-        group = ds->cell_groups[position_i];
-    } else {
-        group = snew(struct group_info);
-        group->size = 0;
-    }
-    flood_queue queue = {NULL, NULL};
-    add_to_flood_queue_end(&queue, position_i);
-    int w = state->shared->params.w;
-    while (queue.start) {
-        int current_position_i = queue.start->position_i;
-        remove_from_flood_queue_start(&queue);
-        if (ASSIGNED(current_position_i)) {
-            continue;
-        }
-        if (!clear) {
-            group->size++;
-        }
-        ds->cell_groups[current_position_i] = clear ? NULL : group;
-        // TODO: Should we define a DECOMPOSE_POSITION macro?
-        int c = current_position_i % w;
-        int r = (current_position_i - c) / w;
-        if (state->borders[current_position_i] & DISABLED(BORDER_U)) {
-            // TODO: Should we define a POSITION macro?
-            int new_c = c, new_r = r - 1, new_position_i = new_r * w + new_c;
-            add_to_flood_queue_end(&queue, new_position_i);
-        }
-        if (state->borders[current_position_i] & DISABLED(BORDER_D)) {
-            int new_c = c, new_r = r + 1, new_position_i = new_r * w + new_c;
-            add_to_flood_queue_end(&queue, new_position_i);
-        }
-        if (state->borders[current_position_i] & DISABLED(BORDER_L)) {
-            int new_c = c - 1, new_r = r, new_position_i = new_r * w + new_c;
-            add_to_flood_queue_end(&queue, new_position_i);
-        }
-        if (state->borders[current_position_i] & DISABLED(BORDER_R)) {
-            int new_c = c + 1, new_r = r, new_position_i = new_r * w + new_c;
-            add_to_flood_queue_end(&queue, new_position_i);
-        }
-    }
-    return clear ? NULL : group;
-    #undef ASSIGNED
-}
-
-static int get_group_size(const game_state *state, game_drawstate *ds, int position_i)
-{
-    return flood_group(state, ds, position_i, false)->size;
 }
 
 #define COLOUR(border)                                                  \
@@ -1563,10 +1459,6 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
             ds->group_colour_indexes[group_size] = HIGHER_COLOUR_GROUP_INDEX(k, group_size);
         }
     }
-    if (!ds->cell_groups) {
-        snewa(ds->cell_groups, wh);
-        setmem(ds->cell_groups, 0, wh);
-    }
     if (!ds->group_size) {
         snewa(ds->group_size, wh);
         setmem(ds->group_size, 0, wh);
@@ -1575,14 +1467,6 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
     build_dsf(w, h, state->borders, black_border_dsf, true);
     build_dsf(w, h, state->borders, yellow_border_dsf, false);
 
-    /*
-        Do 2 passes: first figure what tiles borders have changed, and update
-        the groups, and then draw the tiles.
-        The reason is that a tile might not have changed borders, but they might
-        have changed groups due to another tile changing borders.
-    */
-    dsflags *new_flags = dupmem(ds->grid, wh);
-    /* Border & group checking phase */
     for (r = 0; r < h; ++r)
         for (c = 0; c < w; ++c) {
             int i = r * w + c, clue = state->shared->clues[i], flags, dir;
@@ -1640,30 +1524,8 @@ static void game_redraw(drawing *dr, game_drawstate *ds,
 
                     flags |= BORDER_ERROR(BORDER(dir));
             }
-            new_flags[i] = flags;
-            if (flags != ds->grid[i]) {
-                flood_group(state, ds, i, true);
-                if (r + 1 < h) {
-                    flood_group(state, ds, (r + 1)*w + c, true);
-                }
-                if (r - 1 >= 0) {
-                    flood_group(state, ds, (r - 1)*w + c, true);
-                }
-                if (c + 1 < w) {
-                    flood_group(state, ds, r*w + (c + 1), true);
-                }
-                if (c - 1 >= 0) {
-                    flood_group(state, ds, r*w + (c - 1), true);
-                }
-            }
-        }
 
-    /* Redrawing phase if the borders and/or group changed */
-    for (r = 0; r < h; ++r)
-        for (c = 0; c < w; ++c) {
-            int i = r * w + c, clue = state->shared->clues[i], flags = new_flags[i];
-
-            int group_size = ui->shade_by_group_sizes ? get_group_size(state, ds, i) : 0;
+            int group_size = ui->shade_by_group_sizes ? dsf_size(yellow_border_dsf, i) : 0;
             if (flags == ds->grid[i] && group_size == ds->group_size[i]) continue;
             ds->grid[i] = flags;
             ds->group_size[i] = group_size;
