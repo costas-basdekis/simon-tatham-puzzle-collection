@@ -94,6 +94,9 @@ include(icons/icons.cmake)
 # The main function called from the top-level CMakeLists.txt to define
 # each puzzle.
 function(puzzle NAME)
+  if (NOT(NAME IN_LIST ONLY_GAMES) AND NOT(ONLY_GAMES STREQUAL ""))
+    return()
+  endif()
   cmake_parse_arguments(OPT
     "" "DISPLAYNAME;DESCRIPTION;OBJECTIVE;WINDOWS_EXE_NAME" "" ${ARGN})
 
@@ -155,6 +158,9 @@ endfunction()
 # The main function called from the top-level CMakeLists.txt to define
 # a command-line helper tool.
 function(cliprogram NAME)
+  if (NOT(NAME IN_LIST ONLY_GAMES) AND NOT(ONLY_GAMES EQUAL ""))
+    return()
+  endif()
   cmake_parse_arguments(OPT
     "CORE_LIB;SDL2_LIB" "" "COMPILE_DEFINITIONS" ${ARGN})
 
@@ -182,6 +188,9 @@ endfunction()
 # Similar to cliprogram, but builds a GUI helper tool, linked against
 # the normal puzzle frontend.
 function(guiprogram NAME)
+  if (NOT(NAME IN_LIST ONLY_GAMES) AND NOT(ONLY_GAMES EQUAL ""))
+    return()
+  endif()
   cmake_parse_arguments(OPT
     "" "" "COMPILE_DEFINITIONS" ${ARGN})
 
@@ -200,6 +209,9 @@ endfunction()
 # A small wrapper around cliprogram, taking advantage of the common
 # formula that puzzle 'foo' often comes with 'foosolver'.
 function(solver NAME)
+  if (NOT(NAME IN_LIST ONLY_GAMES) AND NOT(ONLY_GAMES EQUAL ""))
+    return()
+  endif()
   cliprogram(${NAME}solver ${puzzle_src_prefix}${NAME}.c ${ARGN}
     COMPILE_DEFINITIONS STANDALONE_SOLVER)
 endfunction()
