@@ -541,6 +541,39 @@ void midend_new_game(midend *me)
     }
 }
 
+char *get_new_game_desc(midend *me, char *seedstr, char **aux)
+{
+
+    if (me->genmode == GOT_NOTHING) {
+        /*
+         * Generate a new random seed. 15 digits comes to about
+         * 48 bits, which should be more than enough.
+         *
+         * I'll avoid putting a leading zero on the number,
+         * just in case it confuses anybody who thinks it's
+         * processed as an integer rather than a string.
+         */
+        seedstr[15] = '\0';
+        seedstr[0] = '1' + (char)random_upto(me->random, 9);
+        for (int i = 1; i < 15; i++) {
+            seedstr[i] = '0' + (char)random_upto(me->random, 10);
+        }
+    }
+
+    random_state *rs = random_new(seedstr, strlen(seedstr));
+    /*
+     * If this midend has been instantiated without providing a
+     * drawing API, it is non-interactive. This means that it's
+     * being used for bulk game generation, and hence we should
+     * pass the non-interactive flag to new_desc.
+     */
+    char *desc = me->ourgame->new_desc(me->params, rs, aux, (me->drawing != NULL));
+    assert_printable_ascii(desc);
+    random_free(rs);
+
+    return desc;
+}
+
 void midend_create_game(midend *me)
 {
     me->newgame_undo.len = 0;
@@ -569,52 +602,25 @@ void midend_create_game(midend *me)
     assert(me->nstates == 0);
 
     if (me->genmode == GOT_DESC) {
-	me->genmode = GOT_NOTHING;
+        me->genmode = GOT_NOTHING;
     } else {
-        random_state *rs;
-
         if (me->genmode == GOT_SEED) {
             me->genmode = GOT_NOTHING;
         } else {
-            /*
-             * Generate a new random seed. 15 digits comes to about
-             * 48 bits, which should be more than enough.
-             * 
-             * I'll avoid putting a leading zero on the number,
-             * just in case it confuses anybody who thinks it's
-             * processed as an integer rather than a string.
-             */
-            char newseed[16];
-            int i;
-            newseed[15] = '\0';
-            newseed[0] = '1' + (char)random_upto(me->random, 9);
-            for (i = 1; i < 15; i++)
-                newseed[i] = '0' + (char)random_upto(me->random, 10);
             sfree(me->seedstr);
-            me->seedstr = dupstr(newseed);
-
-	    if (me->curparams)
-		me->ourgame->free_params(me->curparams);
-	    me->curparams = me->ourgame->dup_params(me->params);
+            me->seedstr = snewn(16, char);
+            if (me->curparams) {
+                me->ourgame->free_params(me->curparams);
+            }
+            me->curparams = me->ourgame->dup_params(me->params);
         }
 
-	sfree(me->desc);
-	sfree(me->privdesc);
+    	sfree(me->desc);
+    	sfree(me->privdesc);
         sfree(me->aux_info);
-	me->aux_info = NULL;
-
-        rs = random_new(me->seedstr, strlen(me->seedstr));
-	/*
-	 * If this midend has been instantiated without providing a
-	 * drawing API, it is non-interactive. This means that it's
-	 * being used for bulk game generation, and hence we should
-	 * pass the non-interactive flag to new_desc.
-	 */
-        me->desc = me->ourgame->new_desc(me->curparams, rs,
-					 &me->aux_info, (me->drawing != NULL));
-	assert_printable_ascii(me->desc);
-	me->privdesc = NULL;
-        random_free(rs);
+        me->aux_info = NULL;
+        me->desc = get_new_game_desc(me, me->seedstr, &me->aux_info);
+        me->privdesc = NULL;
     }
 
     ensure(me);
