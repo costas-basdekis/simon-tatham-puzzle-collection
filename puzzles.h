@@ -676,6 +676,15 @@ void arraysort_fn(void *array, size_t nmemb, size_t size,
 #define arraysort(array, nmemb, cmp, ctx) \
     arraysort_fn(array, nmemb, sizeof(*(array)), cmp, ctx)
 
+typedef struct desc_data {
+    const game_params *params;
+    random_state *rs;
+    bool interactive;
+    char *aux;
+    char *desc;
+    void *game_desc_data;
+} desc_data;
+
 /*
  * Data structure containing the function calls and data specific
  * to a particular game. This is enclosed in a data structure so

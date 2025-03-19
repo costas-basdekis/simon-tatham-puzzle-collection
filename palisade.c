@@ -625,53 +625,100 @@ static void init_borders(int w, int h, borderflag *borders)
 
 #define xshuffle(ptr, len, rs) shuffle((ptr), (len), sizeof (ptr)[0], (rs))
 
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    clue *numbers;
+    borderflag *rim;
+    borderflag *scratch_borders;
+    char *soln;
+    int *shuf;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h, k = dd->params->k;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->numbers = snewn(wh + 1, clue);
+    gdd->rim = snewn(wh, borderflag);
+    init_borders(w, h, gdd->rim);
+    gdd->scratch_borders = snewn(wh, borderflag);
+
+    dd->aux = gdd->soln = snewa(dd->aux, wh + 2);
+    assert (!('@' & BORDER_MASK));
+    gdd->soln[0] = 'S';
+    gdd->soln[wh + 1] = '\0';
+
+    gdd->shuf = snewn(wh, int);
+    for (int i = 0; i < wh; ++i) {
+        gdd->shuf[i] = i;
+    }
+    xshuffle(gdd->shuf, wh, gdd->rs);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    char *numbers = gdd->numbers;
+    borderflag *rim = gdd->rim;
+    borderflag *scratch_borders = gdd->scratch_borders;
+
+    char *soln = gdd->soln;
+    int *shuf = gdd->shuf;
+    DSF *dsf = NULL;
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h, k = dd->params->k;
+
+    setmem(soln + 1, '@', wh);
+
+    dsf = divvy_rectangle(w, h, k, gdd->rs);
+
+    for (int r = 0; r < h; ++r) {
+        for (int c = 0; c < w; ++c) {
+            int i = r * w + c, dir;
+            numbers[i] = 0;
+            for (dir = 0; dir < 4; ++dir) {
+                int rr = r + dy[dir], cc = c + dx[dir], ii = rr * w + cc;
+                if (OUT_OF_BOUNDS(cc, rr, w, h) || !dsf_equivalent(dsf, i, ii)) {
+                    ++numbers[i];
+                    soln[i + 1] |= BORDER(dir);
+                }
+            }
+        }
+    }
+
+    scopy(scratch_borders, rim, wh);
+    dsf_free(dsf);
+
+    return solver(dd->params, numbers, scratch_borders);
+}
+
 static char *new_game_desc(const game_params *params, random_state *rs,
                            char **aux, bool interactive)
 {
     int w = params->w, h = params->h, wh = w*h, k = params->k;
 
-    clue *numbers = snewn(wh + 1, clue);
-    borderflag *rim = snewn(wh, borderflag);
-    borderflag *scratch_borders = snewn(wh, borderflag);
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+    game_desc_data *gdd = dd.game_desc_data;
 
-    char *soln = snewa(*aux, wh + 2);
-    int *shuf = snewn(wh, int);
-    DSF *dsf = NULL;
-    int i, r, c;
+    char *numbers = gdd->numbers;
+    borderflag *rim = gdd->rim;
+    borderflag *scratch_borders = gdd->scratch_borders;
 
-    for (i = 0; i < wh; ++i) shuf[i] = i;
-    xshuffle(shuf, wh, rs);
+    char *soln = gdd->soln;
+    int *shuf = gdd->shuf;
 
-    init_borders(w, h, rim);
+    while (!attempt_new_desc(&dd)) {}
 
-    assert (!('@' & BORDER_MASK));
-    *soln++ = 'S';
-    soln[wh] = '\0';
-
-    do {
-        setmem(soln, '@', wh);
-
-        dsf_free(dsf);
-        dsf = divvy_rectangle(w, h, k, rs);
-
-        for (r = 0; r < h; ++r)
-            for (c = 0; c < w; ++c) {
-                int i = r * w + c, dir;
-                numbers[i] = 0;
-                for (dir = 0; dir < 4; ++dir) {
-                    int rr = r + dy[dir], cc = c + dx[dir], ii = rr * w + cc;
-                    if (OUT_OF_BOUNDS(cc, rr, w, h) ||
-                        !dsf_equivalent(dsf, i, ii)) {
-                        ++numbers[i];
-                        soln[i] |= BORDER(dir);
-                    }
-                }
-            }
-
-        scopy(scratch_borders, rim, wh);
-    } while (!solver(params, numbers, scratch_borders));
-
-    for (i = 0; i < wh; ++i) {
+    for (int i = 0; i < wh; ++i) {
         int j = shuf[i];
         clue copy = numbers[j];
 
@@ -686,12 +733,11 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     sfree(scratch_borders);
     sfree(rim);
     sfree(shuf);
-    dsf_free(dsf);
 
     char *output = snewn(wh + 1, char), *p = output;
 
-    r = 0;
-    for (i = 0; i < wh; ++i) {
+    int r = 0;
+    for (int i = 0; i < wh; ++i) {
         if (numbers[i] != EMPTY) {
             while (r) {
                 while (r > 26) {
