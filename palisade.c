@@ -660,6 +660,8 @@ static void initialise_desc_data(desc_data *dd)
         gdd->shuf[i] = i;
     }
     xshuffle(gdd->shuf, wh, gdd->rs);
+
+    dd->desc = gdd->desc = snewn(wh + 1, char);
 }
 
 static bool attempt_new_desc(desc_data *dd)
@@ -697,7 +699,45 @@ static bool attempt_new_desc(desc_data *dd)
     scopy(scratch_borders, rim, wh);
     dsf_free(dsf);
 
-    return solver(dd->params, numbers, scratch_borders);
+    bool solved = solver(dd->params, numbers, scratch_borders);
+
+    /* Remove any unnecessary clues */
+    if (solved) {
+        for (int i = 0; i < wh; ++i) {
+            int j = shuf[i];
+            clue copy = numbers[j];
+
+            scopy(scratch_borders, rim, wh);
+            numbers[j] = EMPTY; /* strip away unnecssary clues */
+            if (!solver(gdd->params, numbers, scratch_borders)) {
+                numbers[j] = copy;
+            }
+        }
+
+        numbers[wh] = '\0';
+    }
+
+    /* Convert the clues into a description */
+    char *p = gdd->desc;
+    int r = 0;
+    for (int i = 0; i < wh; ++i) {
+        if (numbers[i] != EMPTY) {
+            while (r) {
+                while (r > 26) {
+                    *p++ = 'z';
+                    r -= 26;
+                }
+                *p++ = 'a'-1 + r;
+                r = 0;
+            }
+            *p++ = '0' + numbers[i];
+        } else {
+            ++r;
+        }
+    }
+    *p++ = '\0';
+
+    return solved;
 }
 
 static char *new_game_desc(const game_params *params, random_state *rs,
@@ -717,43 +757,15 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     int *shuf = gdd->shuf;
 
     while (!attempt_new_desc(&dd)) {}
-
-    for (int i = 0; i < wh; ++i) {
-        int j = shuf[i];
-        clue copy = numbers[j];
-
-        scopy(scratch_borders, rim, wh);
-        numbers[j] = EMPTY; /* strip away unnecssary clues */
-        if (!solver(params, numbers, scratch_borders))
-            numbers[j] = copy;
-    }
-
-    numbers[wh] = '\0';
+    char *output = sresize(gdd->desc, strlen(gdd->desc) + 1, char);
 
     sfree(scratch_borders);
     sfree(rim);
     sfree(shuf);
-
-    char *output = snewn(wh + 1, char), *p = output;
-
-    int r = 0;
-    for (int i = 0; i < wh; ++i) {
-        if (numbers[i] != EMPTY) {
-            while (r) {
-                while (r > 26) {
-                    *p++ = 'z';
-                    r -= 26;
-                }
-                *p++ = 'a'-1 + r;
-                r = 0;
-            }
-            *p++ = '0' + numbers[i];
-        } else ++r;
-    }
-    *p++ = '\0';
-
     sfree(numbers);
-    return sresize(output, p - output, char);
+    sfree(gdd);
+
+    return output;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
