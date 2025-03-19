@@ -740,32 +740,36 @@ static bool attempt_new_desc(desc_data *dd)
     return solved;
 }
 
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->scratch_borders);
+    sfree(gdd->rim);
+    sfree(gdd->shuf);
+    sfree(gdd->numbers);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->soln);
+    } else {
+        dd->desc = sresize(dd->desc, strlen(dd->desc) + 1, char);
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
 static char *new_game_desc(const game_params *params, random_state *rs,
                            char **aux, bool interactive)
 {
-    int w = params->w, h = params->h, wh = w*h, k = params->k;
-
     desc_data dd = {params, rs, interactive, *aux};
     initialise_desc_data(&dd);
-    game_desc_data *gdd = dd.game_desc_data;
-
-    char *numbers = gdd->numbers;
-    borderflag *rim = gdd->rim;
-    borderflag *scratch_borders = gdd->scratch_borders;
-
-    char *soln = gdd->soln;
-    int *shuf = gdd->shuf;
 
     while (!attempt_new_desc(&dd)) {}
-    char *output = sresize(gdd->desc, strlen(gdd->desc) + 1, char);
+    destroy_desc_data(&dd, true);
 
-    sfree(scratch_borders);
-    sfree(rim);
-    sfree(shuf);
-    sfree(numbers);
-    sfree(gdd);
+    *aux = dd.aux;
 
-    return output;
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
