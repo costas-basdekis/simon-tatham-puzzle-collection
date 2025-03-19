@@ -190,6 +190,9 @@ struct frontend {
     drawing *dr;
     int xmin, ymin;
     float puzz_scale;
+    HWND stop_new_game_window;
+    HWND stop_new_game_label;
+    bool stop_new_game_dialog_done;
 };
 
 void frontend_free(frontend *fe)
@@ -1419,6 +1422,10 @@ static frontend *frontend_new(HINSTANCE inst)
 
     SetWindowLongPtr(fe->hwnd, GWLP_USERDATA, (LONG_PTR)fe);
 
+    fe->stop_new_game_window = NULL;
+    fe->stop_new_game_label = NULL;
+    fe->stop_new_game_dialog_done = false;
+
     return fe;
 }
 
@@ -1435,6 +1442,146 @@ static bool savefile_read(void *wctx, void *buf, int len)
 
     ret = fread(buf, 1, len, fp);
     return (ret == len);
+}
+
+static int CALLBACK StopNewGameDlgProc(HWND hwnd, UINT msg,
+                 WPARAM wParam, LPARAM lParam)
+{
+    frontend *fe = (frontend *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+      case WM_INITDIALOG:
+        return 1;
+      case WM_CLOSE:
+        fe->stop_new_game_dialog_done = true;
+        return 0;
+    }
+
+    return 0;
+}
+
+static void make_stop_new_game_window(frontend *fe)
+{
+    WNDCLASS wc;
+    HDC hdc;
+    int winwidth, winheight;
+
+    wc.style = CS_DBLCLKS | CS_SAVEBITS;
+    wc.lpfnWndProc = DefDlgProc;
+    wc.cbClsExtra = 0;
+    wc.cbWndExtra = DLGWINDOWEXTRA + 8;
+    wc.hInstance = fe->inst;
+    wc.hIcon = NULL;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH) (COLOR_BACKGROUND +1);
+    wc.lpszMenuName = NULL;
+    wc.lpszClassName = "GameStopNewGame";
+    RegisterClass(&wc);
+
+    hdc = GetDC(fe->hwnd);
+    SetMapMode(hdc, MM_TEXT);
+
+    // TODO: Is this OK to reuse this variable? It should be
+    fe->cfgfont = CreateFont(-MulDiv(8, GetDeviceCaps(hdc, LOGPIXELSY), 72),
+                 0, 0, 0, 0,
+                 false, false, false, DEFAULT_CHARSET,
+                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                 DEFAULT_QUALITY,
+                 FF_SWISS,
+                 "MS Shell Dlg");
+
+    winheight = 100;
+    winwidth = 200;
+
+    /*
+     * Create the dialog, now that we know its size.
+     */
+    {
+        RECT r, r2;
+
+        r.left = r.top = 0;
+        r.right = winwidth;
+        r.bottom = winheight;
+
+        AdjustWindowRectEx(&r, (WS_OVERLAPPEDWINDOW /*|
+                    DS_MODALFRAME | WS_POPUP | WS_VISIBLE |
+                    WS_CAPTION | WS_SYSMENU*/) &~
+                   (WS_MAXIMIZEBOX | WS_OVERLAPPED),
+                   false, 0);
+
+        /*
+         * Centre the dialog on its parent window.
+         */
+        r.right -= r.left;
+        r.bottom -= r.top;
+        GetWindowRect(fe->hwnd, &r2);
+        r.left = (r2.left + r2.right - r.right) / 2;
+        r.top = (r2.top + r2.bottom - r.bottom) / 2;
+        r.right += r.left;
+        r.bottom += r.top;
+
+        fe->stop_new_game_window = CreateWindowEx(
+            0, wc.lpszClassName, "Creating new game...",
+            DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU,
+            r.left, r.top, r.right-r.left, r.bottom-r.top,
+            fe->hwnd, NULL, fe->inst, NULL);
+    }
+
+    SendMessage(fe->stop_new_game_window, WM_SETFONT, (WPARAM)fe->cfgfont, false);
+
+    SetWindowLongPtr(fe->stop_new_game_window, GWLP_USERDATA, (LONG_PTR)fe);
+    SetWindowLongPtr(fe->stop_new_game_window, DWLP_DLGPROC, (LONG_PTR)StopNewGameDlgProc);
+
+    fe->stop_new_game_label = CreateWindowEx(0, "Static", "Creating new game...",
+             WS_CHILD | WS_VISIBLE, 10, 20, winwidth - 20, 30,
+             fe->stop_new_game_window, (HMENU)1000, fe->inst, NULL);
+    SendMessage(fe->stop_new_game_label, WM_SETFONT, (WPARAM)fe->cfgfont, MAKELPARAM(true, 0));
+
+    SendMessage(fe->stop_new_game_window, WM_INITDIALOG, 0, 0);
+
+    EnableWindow(fe->hwnd, false);
+    ShowWindow(fe->stop_new_game_window, SW_SHOWNORMAL);
+
+    MSG msg;
+    int gm;
+    while (!fe->stop_new_game_dialog_done && (gm = GetMessage(&msg, NULL, 0, 0)) > 0) {
+        if (!IsDialogMessage(fe->stop_new_game_window, &msg)) {
+            DispatchMessage(&msg);
+        }
+        if (fe->stop_new_game_dialog_done) {
+            fe->stop_new_game_dialog_done = false;
+            break;
+        }
+    }
+    EnableWindow(fe->hwnd, true);
+    SetForegroundWindow(fe->hwnd);
+    DestroyWindow(fe->stop_new_game_window);
+    DeleteObject(fe->cfgfont);
+}
+
+DWORD WINAPI control_new_game(void *arg)
+{
+    frontend *fe = arg;
+    make_stop_new_game_window(fe);
+    return 0;
+}
+
+void new_game_started(drawing *dr)
+{
+    frontend *fe = GET_HANDLE_AS_TYPE(dr, frontend);
+    EnableMenuItem(fe->gamemenu, IDM_NEW, MF_DISABLED);
+    fe->stop_new_game_dialog_done = false;
+    CreateThread(NULL, 0, control_new_game, fe, 0, NULL);
+}
+
+void new_game_finished(drawing *dr)
+{
+    frontend *fe = GET_HANDLE_AS_TYPE(dr, frontend);
+    EnableMenuItem(fe->gamemenu, IDM_NEW, MF_ENABLED);
+    fe->stop_new_game_dialog_done = true;
+    if (fe->stop_new_game_window) {
+        SendMessage(fe->stop_new_game_window, WM_CLOSE, 0, 0);
+    }
 }
 
 /*

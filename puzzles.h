@@ -254,6 +254,8 @@ void frontend_default_colour(frontend *fe, float *output);
 void deactivate_timer(frontend *fe);
 void activate_timer(frontend *fe);
 void get_random_seed(void **randseed, int *randseedsize);
+void new_game_started(drawing *dr);
+void new_game_finished(drawing *dr);
 
 /*
  * drawing.c

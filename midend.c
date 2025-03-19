@@ -528,7 +528,20 @@ static bool midend_serialise_buf_read(void *ctx, void *buf, int len)
     return true;
 }
 
+void midend_create_game(midend *me);
+
 void midend_new_game(midend *me)
+{
+    if (me->nstates > 0) {
+        new_game_started(me->drawing);
+    }
+    midend_create_game(me);
+    if (me->nstates > 0) {
+        new_game_finished(me->drawing);
+    }
+}
+
+void midend_create_game(midend *me)
 {
     me->newgame_undo.len = 0;
     if (me->newgame_can_store_undo) {
