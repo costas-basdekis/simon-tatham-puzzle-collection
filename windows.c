@@ -59,6 +59,8 @@ enum { NONE, HLP, CHM } help_type;
 char *help_path;
 bool help_has_contents;
 
+#define WM_NEW_GAME_COMPLETE (WM_APP + 1)
+
 #ifndef FILENAME_MAX
 #define	FILENAME_MAX	(260)
 #endif
@@ -1582,6 +1584,31 @@ void new_game_finished(drawing *dr)
     if (fe->stop_new_game_window) {
         SendMessage(fe->stop_new_game_window, WM_CLOSE, 0, 0);
     }
+}
+
+typedef struct get_new_game_desc_args {
+    midend *me;
+    frontend *fe;
+    new_game_desc_args *args;
+} get_new_game_desc_args;
+
+DWORD WINAPI get_new_game_desc_thread(void *arg)
+{
+    get_new_game_desc_args *thread_args = arg;
+    new_game_desc_args *args = thread_args->args;
+    midend *me = thread_args->me;
+    get_new_game_desc(me, args);
+    PostMessage(thread_args->fe->hwnd, WM_NEW_GAME_COMPLETE, (WPARAM)arg, (LPARAM)NULL);
+    return 0;
+}
+
+void get_new_game_desc_async(midend *me, frontend *fe, new_game_desc_args *args)
+{
+    get_new_game_desc_args *thread_args = snew(get_new_game_desc_args);
+    thread_args->me = me;
+    thread_args->fe = fe;
+    thread_args->args = args;
+    CreateThread(NULL, 0, get_new_game_desc_thread, thread_args, 0, NULL);
 }
 
 /*
@@ -3287,6 +3314,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
             return true;
         }
         break;
+	  case WM_NEW_GAME_COMPLETE:
+	  {
+		  get_new_game_desc_args *thread_args = (get_new_game_desc_args *)wParam;
+		  new_game_async_complete(thread_args->me, thread_args->args);
+		  sfree(thread_args);
+		  break;
+	  }
     }
 
     return DefWindowProc(hwnd, message, wParam, lParam);

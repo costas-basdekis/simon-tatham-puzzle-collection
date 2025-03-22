@@ -91,6 +91,7 @@ enum {
 
 typedef struct frontend frontend;
 typedef struct config_item config_item;
+typedef enum Genmode Genmode;
 typedef struct midend midend;
 typedef struct random_state random_state;
 typedef struct game_params game_params;
@@ -256,6 +257,8 @@ void activate_timer(frontend *fe);
 void get_random_seed(void **randseed, int *randseedsize);
 void new_game_started(drawing *dr);
 void new_game_finished(drawing *dr);
+typedef struct new_game_desc_args new_game_desc_args;
+void get_new_game_desc_async(midend *me, frontend *fe, new_game_desc_args *args);
 
 /*
  * drawing.c
@@ -322,6 +325,8 @@ game_params *midend_get_params(midend *me);
 void midend_size(midend *me, int *x, int *y, bool user_size,
                  double device_pixel_ratio);
 void midend_reset_tilesize(midend *me);
+char *get_new_game_desc(midend *me, new_game_desc_args *args);
+void new_game_async_complete(midend *me, new_game_desc_args *args);
 void midend_new_game(midend *me);
 void midend_restart_game(midend *me);
 void midend_stop_anim(midend *me);

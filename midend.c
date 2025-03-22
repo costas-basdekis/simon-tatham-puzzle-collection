@@ -35,6 +35,8 @@ struct midend_serialise_buf_read_ctx {
     int len, pos;
 };
 
+enum Genmode { GOT_SEED, GOT_DESC, GOT_NOTHING };
+
 struct midend {
     frontend *frontend;
     random_state *random;
@@ -68,7 +70,7 @@ struct midend {
      */
     char *desc, *privdesc, *seedstr;
     char *aux_info;
-    enum { GOT_SEED, GOT_DESC, GOT_NOTHING } genmode;
+    Genmode genmode;
 
     int nstates, statesize, statepos;
     struct midend_state_entry *states;
@@ -528,53 +530,197 @@ static bool midend_serialise_buf_read(void *ctx, void *buf, int len)
     return true;
 }
 
+int get_game_id(midend *me)
+{
+    int game_id = -1;
+    #ifdef COMBINED
+        for (int i = 0 ; i < gamecount ; i++) {
+            if (me->ourgame == gamelist[i]) {
+                game_id = i;
+                break;
+            }
+        }
+        assert(game_id > -1 && "Could not find game id");
+    #endif
+    return game_id;
+}
+
+char *get_new_seedstr(midend *me, char *seedstr)
+{
+    if (!seedstr) {
+        seedstr = snewn(16, char);
+    }
+    /*
+     * Generate a new random seed. 15 digits comes to about
+     * 48 bits, which should be more than enough.
+     *
+     * I'll avoid putting a leading zero on the number,
+     * just in case it confuses anybody who thinks it's
+     * processed as an integer rather than a string.
+     */
+    seedstr[15] = '\0';
+    seedstr[0] = '1' + (char)random_upto(me->random, 9);
+    for (int i = 1; i < 15; i++) {
+        seedstr[i] = '0' + (char)random_upto(me->random, 10);
+    }
+    return seedstr;
+}
+
 void midend_create_game(midend *me);
+void midend_create_game_inner(midend *me, new_game_desc_args *args);
+
+typedef struct new_game_desc_args {
+    int game_id;
+    Genmode genmode;
+    game_params *params;
+    char *seedstr;
+    char *aux;
+    bool interactive;
+    char *desc;
+} new_game_desc_args;
+
+void new_game_async_complete(midend *me, new_game_desc_args *args)
+{
+    midend_create_game_inner(me, args);
+    midend_redraw(me);
+    new_game_finished(me->drawing);
+}
 
 void midend_new_game(midend *me)
 {
-    if (me->nstates > 0) {
+    if (me->nstates > 0 && (me->genmode == GOT_NOTHING || me->genmode == GOT_SEED)) {
         new_game_started(me->drawing);
-    }
-    midend_create_game(me);
-    if (me->nstates > 0) {
-        new_game_finished(me->drawing);
+        new_game_desc_args *args = snew(new_game_desc_args);
+        args->game_id = get_game_id(me);
+        args->genmode = me->genmode;
+        args->params = me->ourgame->dup_params(me->params);
+        if (me->genmode == GOT_NOTHING) {
+            args->seedstr = get_new_seedstr(me, NULL);
+        } else {
+            args->seedstr = dupstr(me->seedstr);
+        }
+        args->aux = NULL;
+        args->interactive = me->drawing != NULL;
+        args->desc = NULL;
+        get_new_game_desc_async(me, me->frontend, args);
+    } else {
+        midend_create_game(me);
     }
 }
 
-char *get_new_game_desc(midend *me, char *seedstr, char **aux)
+char *serialise_new_game_desc_args(midend *me, new_game_desc_args *args)
 {
+    char *serialised_params = me->ourgame->encode_params(args->params, true);
+    int serialised_params_len = strlen(serialised_params);
+    int seedstr_len = args->seedstr ? strlen(args->seedstr) : 0;
+    int aux_len = args->aux ? strlen(args->aux) : 0;
+    int desc_len = args->desc ? strlen(args->desc) : 0;
+    char *serialised = snewn(
+        11
+        + 11
+        + 11 + serialised_params_len
+        + 11 + seedstr_len
+        + 11 + aux_len
+        + 11
+        + 11 + desc_len
+        + 1,
+        char
+    );
+    sprintf(
+        serialised, "%d:%d:%d:%s:%d:%s:%d:%s:%d:%d:%s",
+        args->game_id,
+        args->genmode,
+        strlen(serialised_params), serialised_params,
+        seedstr_len, args->seedstr ? args->seedstr : "",
+        aux_len, args->aux ? args->aux : "",
+        args->interactive,
+        desc_len, args->desc ? args->desc : ""
+    );
+    sfree(serialised_params);
+    return serialised;
+}
 
-    if (me->genmode == GOT_NOTHING) {
-        /*
-         * Generate a new random seed. 15 digits comes to about
-         * 48 bits, which should be more than enough.
-         *
-         * I'll avoid putting a leading zero on the number,
-         * just in case it confuses anybody who thinks it's
-         * processed as an integer rather than a string.
-         */
-        seedstr[15] = '\0';
-        seedstr[0] = '1' + (char)random_upto(me->random, 9);
-        for (int i = 1; i < 15; i++) {
-            seedstr[i] = '0' + (char)random_upto(me->random, 10);
-        }
+int deserialise_int(char **serialised_ptr)
+{
+    char *serialised = *serialised_ptr;
+    int number;
+    int read_count = sscanf(serialised, "%d:", &number);
+    serialised += read_count + 1;
+    *serialised_ptr = serialised;
+    return number;
+}
+
+char *deserialise_string(char **serialised_ptr)
+{
+    char *serialised = *serialised_ptr;
+    int len;
+    int read_count = sscanf(serialised, "%d:", &len);
+    serialised += read_count + 1;
+    char *result;
+    if (len == 0) {
+        result = NULL;
+    } else {
+        result = snewn(len + 1, char);
+        strncpy(result, serialised, len);
+        result[len] = '\0';
     }
+    serialised += len + 1;
+    *serialised_ptr = serialised;
+    return result;
+}
 
-    random_state *rs = random_new(seedstr, strlen(seedstr));
+void deserialise_new_game_desc_args(midend *me, new_game_desc_args *args, char *serialised)
+{
+    args->game_id = deserialise_int(&serialised);
+    args->genmode = deserialise_int(&serialised);
+    char *serialised_params = deserialise_string(&serialised);
+    args->params = me->ourgame->default_params();
+    me->ourgame->decode_params(args->params, serialised_params);
+    sfree(serialised_params);
+    args->seedstr = deserialise_string(&serialised);
+    args->aux = deserialise_string(&serialised);
+    args->interactive = deserialise_int(&serialised) != 0;
+    args->desc = deserialise_string(&serialised);
+}
+
+char *get_new_game_desc(midend *me, new_game_desc_args *args)
+{
+    random_state *rs = random_new(args->seedstr, strlen(args->seedstr));
     /*
      * If this midend has been instantiated without providing a
      * drawing API, it is non-interactive. This means that it's
      * being used for bulk game generation, and hence we should
      * pass the non-interactive flag to new_desc.
      */
-    char *desc = me->ourgame->new_desc(me->params, rs, aux, (me->drawing != NULL));
-    assert_printable_ascii(desc);
+    args->desc = me->ourgame->new_desc(args->params, rs, &args->aux, args->interactive);
+    assert_printable_ascii(args->desc);
     random_free(rs);
 
-    return desc;
+    return args->desc;
 }
 
 void midend_create_game(midend *me)
+{
+    new_game_desc_args args = {
+        get_game_id(me),
+        me->genmode,
+        me->ourgame->dup_params(me->curparams ? me->curparams : me->params),
+        me->seedstr ? dupstr(me->seedstr) : NULL,
+        NULL,
+        me->drawing != NULL,
+        NULL
+    };
+    if (me->genmode != GOT_DESC) {
+        if (me->genmode == GOT_NOTHING) {
+            sfree(args.seedstr);
+            args.seedstr = get_new_seedstr(me, NULL);
+        }
+        args.desc = get_new_game_desc(me, &args);
+    }
+    midend_create_game_inner(me, &args);
+}
+
+void midend_create_game_inner(midend *me, new_game_desc_args *args)
 {
     me->newgame_undo.len = 0;
     if (me->newgame_can_store_undo) {
@@ -601,6 +747,7 @@ void midend_create_game(midend *me)
 
     assert(me->nstates == 0);
 
+    me->genmode = args->genmode;
     if (me->genmode == GOT_DESC) {
         me->genmode = GOT_NOTHING;
     } else {
@@ -608,18 +755,18 @@ void midend_create_game(midend *me)
             me->genmode = GOT_NOTHING;
         } else {
             sfree(me->seedstr);
-            me->seedstr = snewn(16, char);
+            me->seedstr = args->seedstr;
             if (me->curparams) {
                 me->ourgame->free_params(me->curparams);
             }
-            me->curparams = me->ourgame->dup_params(me->params);
+            me->curparams = args->params;
         }
 
     	sfree(me->desc);
     	sfree(me->privdesc);
         sfree(me->aux_info);
-        me->aux_info = NULL;
-        me->desc = get_new_game_desc(me, me->seedstr, &me->aux_info);
+        me->aux_info = args->aux;
+        me->desc = args->desc;
         me->privdesc = NULL;
     }
 
