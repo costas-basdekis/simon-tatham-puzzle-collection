@@ -308,9 +308,12 @@ static game_state *blank_game(int order, Mode mode)
     return state;
 }
 
-static game_state *dup_game(const game_state *state)
+static game_state *dup_game_reuse(const game_state *state, game_state *existing)
 {
-    game_state *ret = blank_game(state->order, state->mode);
+    game_state *ret = existing;
+    if (!ret) {
+        ret = blank_game(state->order, state->mode);
+    }
     int o2 = state->order*state->order, o3 = o2*state->order;
 
     memcpy(ret->nums, state->nums, o2 * sizeof(digit));
@@ -318,6 +321,11 @@ static game_state *dup_game(const game_state *state)
     memcpy(ret->flags, state->flags, o2 * sizeof(unsigned int));
 
     return ret;
+}
+
+static game_state *dup_game(const game_state *state)
+{
+    return dup_game_reuse(state, NULL);
 }
 
 static void free_game(game_state *state)
@@ -945,10 +953,13 @@ done:
  * Game generation.
  */
 
-static char *latin_desc(digit *sq, size_t order)
+static char *latin_desc_reuse(digit *sq, size_t order, char *existing)
 {
     int o2 = order*order, i;
-    char *soln = snewn(o2+2, char);
+    char *soln = existing;
+    if (!soln) {
+        soln = snewn(o2+2, char);
+    }
 
     soln[0] = 'S';
     for (i = 0; i < o2; i++)
@@ -956,6 +967,11 @@ static char *latin_desc(digit *sq, size_t order)
     soln[o2+1] = '\0';
 
     return soln;
+}
+
+static char *latin_desc(digit *sq, size_t order)
+{
+    return latin_desc_reuse(sq, order, NULL);
 }
 
 /* returns true if it placed (or could have placed) clue. */
@@ -1190,31 +1206,64 @@ static void add_adjacent_flags(game_state *state, digit *latin)
     }
 }
 
-static char *new_game_desc(const game_params *params_in, random_state *rs,
-			   char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    int *scratch;
+    digit *sq;
+    int ntries;
+    game_state *state;
+    game_state *copy;
+    char *buf;
+    int desc_size;
+    char *desc;
+    char *aux;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
-    game_params params_copy = *params_in; /* structure copy */
-    game_params *params = &params_copy;
-    digit *sq = NULL;
-    int i, x, y, retlen, k, nsol;
-    int o2 = params->order * params->order, ntries = 1;
-    int *scratch, lscratch = o2*5;
-    char *ret, buf[80];
-    game_state *state = blank_game(params->order, params->mode);
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
 
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    int o = gdd->params->order, o2 = o * o, m = gdd->params->mode;
+
+    int lscratch = o2 * 5;
     /* Generate a list of 'things to strip' (randomised later) */
-    scratch = snewn(lscratch, int);
     /* Put the numbers (4 mod 5) before the inequalities (0-3 mod 5) */
-    for (i = 0; i < lscratch; i++) scratch[i] = (i%o2)*5 + 4 - (i/o2);
+    gdd->scratch = snewn(lscratch, int);
+    for (int i = 0; i < lscratch; i++) gdd->scratch[i] = (i%o2)*5 + 4 - (i/o2);
+    gdd->sq = latin_generate(o, gdd->rs);
+    gdd->state = blank_game(o, m);
+    gdd->copy = dup_game(gdd->state);
+    gdd->buf = snewn(80, char);
 
-generate:
+    gdd->desc_size = o2 + 1;
+    dd->desc = gdd->desc = snewn(gdd->desc_size, char);
+    dd->aux = gdd->aux = snewn(o2 + 2, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    game_params params_copy = *gdd->params; /* structure copy */
+    game_params *params = &params_copy;
+    digit *sq = gdd->sq;
+    int x, y, retlen, k, nsol;
+    int o2 = params->order * params->order;
+    int *scratch = gdd->scratch, lscratch = o2*5;
+    char *ret = gdd->desc, *buf = gdd->buf;
+    game_state *state = gdd->state;
+
+    bool solved = true;
 #ifdef STANDALONE_SOLVER
     if (solver_show_working)
         printf("new_game_desc: generating %s puzzle, ntries so far %d\n",
                unequal_diffnames[params->diff], ntries);
 #endif
-    if (sq) sfree(sq);
-    sq = latin_generate(params->order, rs);
+    latin_generate_reuse(params->order, rs, sq);
     latin_debug(sq, params->order);
     /* Separately shuffle the numeric and inequality clues */
     shuffle(scratch, lscratch/5, sizeof(int), rs);
@@ -1230,29 +1279,29 @@ generate:
 
     gg_solved = 0;
     if (game_assemble(state, scratch, sq, params->diff) < 0)
-        goto generate;
+        solved = false;
     game_strip(state, scratch, sq, params->diff);
 
     if (params->diff > 0) {
-        game_state *copy = dup_game(state);
+        game_state *copy = dup_game_reuse(state, gdd->copy);
         nsol = solver_state(copy, params->diff-1);
-        free_game(copy);
         if (nsol > 0) {
 #ifdef STANDALONE_SOLVER
             if (solver_show_working)
                 printf("game_assemble: puzzle as generated is too easy.\n");
 #endif
-            if (ntries < MAXTRIES) {
-                ntries++;
-                goto generate;
-            }
+            if (gdd->ntries < MAXTRIES) {
+                gdd->ntries++;
+                solved = false;
+            } else {
 #ifdef STANDALONE_SOLVER
-            if (solver_show_working)
-                printf("Unable to generate %s %dx%d after %d attempts.\n",
-                       unequal_diffnames[params->diff],
-                       params->order, params->order, MAXTRIES);
-#endif
-            params->diff--;
+                if (solver_show_working)
+                    printf("Unable to generate %s %dx%d after %d attempts.\n",
+                           unequal_diffnames[params->diff],
+                           params->order, params->order, MAXTRIES);
+    #endif
+                params->diff--;
+            }
         }
     }
 #ifdef STANDALONE_SOLVER
@@ -1261,7 +1310,7 @@ generate:
                unequal_diffnames[params->diff], ntries, gg_solved);
 #endif
 
-    ret = NULL; retlen = 0;
+    ret = gdd->desc; retlen = 0;
     for (y = 0; y < params->order; y++) {
         for (x = 0; x < params->order; x++) {
             unsigned int f = GRID(state, flags, x, y);
@@ -1272,18 +1321,51 @@ generate:
                         (f & F_ADJ_DOWN)  ? "D" : "",
                         (f & F_ADJ_LEFT)  ? "L" : "");
 
-            ret = sresize(ret, retlen + k + 1, char);
+            if (retlen + k + 1 > gdd->desc_size) {
+                gdd->desc_size = retlen + k + 1;
+                dd->desc = gdd->desc = ret = sresize(gdd->desc, gdd->desc_size, char);
+            }
             strcpy(ret + retlen, buf);
             retlen += k;
         }
     }
-    *aux = latin_desc(sq, params->order);
+    latin_desc_reuse(sq, params->order, gdd->aux);
 
-    free_game(state);
-    sfree(sq);
-    sfree(scratch);
+    return solved;
+}
 
-    return ret;
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->scratch);
+    sfree(gdd->sq);
+    free_game(gdd->state);
+    sfree(gdd->copy);
+    sfree(gdd->buf);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static game_state *load_game(const game_params *params, const char *desc,
@@ -2224,6 +2306,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON | REQUIRE_NUMPAD,  /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 /* ----------------------------------------------------------------------
