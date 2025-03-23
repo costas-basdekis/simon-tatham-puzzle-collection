@@ -3216,6 +3216,8 @@ const struct game thegame = {
     true,			       /* wants_statusbar */
     true, game_timing_state,
     BUTTON_BEATS(LEFT_BUTTON, RIGHT_BUTTON) | REQUIRE_RBUTTON,
+    // There is no need for iterative game creation, we don't have to search for a solvable game
+    NULL, NULL, NULL
 };
 
 #ifdef STANDALONE_OBFUSCATOR
