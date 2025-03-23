@@ -259,6 +259,7 @@ void new_game_started(drawing *dr);
 void new_game_finished(drawing *dr);
 typedef struct new_game_desc_args new_game_desc_args;
 void get_new_game_desc_async(midend *me, frontend *fe, new_game_desc_args *args);
+void new_game_attempt(void *arg, midend *me, new_game_desc_args *args, int attempts, bool solved);
 
 /*
  * drawing.c
@@ -325,7 +326,8 @@ game_params *midend_get_params(midend *me);
 void midend_size(midend *me, int *x, int *y, bool user_size,
                  double device_pixel_ratio);
 void midend_reset_tilesize(midend *me);
-char *get_new_game_desc(midend *me, new_game_desc_args *args);
+char *get_new_game_desc(midend *me, new_game_desc_args *args, bool iterative, void *iterative_arg);
+void new_game_async_attempt(midend *me, new_game_desc_args *args);
 void new_game_async_complete(midend *me, new_game_desc_args *args);
 void midend_new_game(midend *me);
 void midend_restart_game(midend *me);
@@ -771,6 +773,9 @@ struct game {
     bool is_timed;
     bool (*timing_state)(const game_state *state, game_ui *ui);
     int flags;
+    void (*initialise_desc_data)(desc_data *dd);
+    bool (*attempt_new_desc)(desc_data *dd);
+    void (*destroy_desc_data)(desc_data *dd, bool keep_outputs);
 };
 
 #define GET_HANDLE_AS_TYPE(dr, type) ((type*)((dr)->handle))

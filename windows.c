@@ -60,6 +60,7 @@ char *help_path;
 bool help_has_contents;
 
 #define WM_NEW_GAME_COMPLETE (WM_APP + 1)
+#define WM_NEW_GAME_ATTEMPT (WM_APP + 2)
 
 #ifndef FILENAME_MAX
 #define	FILENAME_MAX	(260)
@@ -1568,12 +1569,28 @@ DWORD WINAPI control_new_game(void *arg)
     return 0;
 }
 
+typedef struct get_new_game_desc_args {
+    midend *me;
+    frontend *fe;
+    new_game_desc_args *args;
+    int attempts;
+    bool solved;
+} get_new_game_desc_args;
+
 void new_game_started(drawing *dr)
 {
     frontend *fe = GET_HANDLE_AS_TYPE(dr, frontend);
     EnableMenuItem(fe->gamemenu, IDM_NEW, MF_DISABLED);
     fe->stop_new_game_dialog_done = false;
     CreateThread(NULL, 0, control_new_game, fe, 0, NULL);
+}
+
+void new_game_attempt(void *arg, midend *me, new_game_desc_args *args, int attempts, bool solved)
+{
+	get_new_game_desc_args *thread_args = arg;
+	thread_args->attempts = attempts;
+	thread_args->solved = solved;
+	SendMessage(thread_args->fe->hwnd, WM_NEW_GAME_ATTEMPT, (WPARAM)thread_args, (LPARAM)NULL);
 }
 
 void new_game_finished(drawing *dr)
@@ -1586,19 +1603,13 @@ void new_game_finished(drawing *dr)
     }
 }
 
-typedef struct get_new_game_desc_args {
-    midend *me;
-    frontend *fe;
-    new_game_desc_args *args;
-} get_new_game_desc_args;
-
 DWORD WINAPI get_new_game_desc_thread(void *arg)
 {
     get_new_game_desc_args *thread_args = arg;
     new_game_desc_args *args = thread_args->args;
     midend *me = thread_args->me;
-    get_new_game_desc(me, args);
-    PostMessage(thread_args->fe->hwnd, WM_NEW_GAME_COMPLETE, (WPARAM)arg, (LPARAM)NULL);
+    get_new_game_desc(me, args, true, thread_args);
+    SendMessage(thread_args->fe->hwnd, WM_NEW_GAME_COMPLETE, (WPARAM)arg, (LPARAM)NULL);
     return 0;
 }
 
@@ -1608,6 +1619,8 @@ void get_new_game_desc_async(midend *me, frontend *fe, new_game_desc_args *args)
     thread_args->me = me;
     thread_args->fe = fe;
     thread_args->args = args;
+    thread_args->attempts = 0;
+    thread_args->solved = false;
     CreateThread(NULL, 0, get_new_game_desc_thread, thread_args, 0, NULL);
 }
 
@@ -3321,6 +3334,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
 		  sfree(thread_args);
 		  break;
 	  }
+		case WM_NEW_GAME_ATTEMPT:
+		{
+			get_new_game_desc_args *thread_args = (get_new_game_desc_args*)wParam;
+			new_game_async_attempt(thread_args->me, thread_args->args);
+			char buf[64];
+			sprintf(buf, "Creating game, %d attempts so far...", thread_args->attempts);
+			SetWindowText(fe->stop_new_game_label, buf);
+			break;
+		}
     }
 
     return DefWindowProc(hwnd, message, wParam, lParam);

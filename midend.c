@@ -579,6 +579,13 @@ typedef struct new_game_desc_args {
     char *desc;
 } new_game_desc_args;
 
+void new_game_async_attempt(midend *me, new_game_desc_args *args)
+{
+    midend_create_game_inner(me, args);
+    midend_solve(me);
+    midend_redraw(me);
+}
+
 void new_game_async_complete(midend *me, new_game_desc_args *args)
 {
     midend_create_game_inner(me, args);
@@ -683,7 +690,7 @@ void deserialise_new_game_desc_args(midend *me, new_game_desc_args *args, char *
     args->desc = deserialise_string(&serialised);
 }
 
-char *get_new_game_desc(midend *me, new_game_desc_args *args)
+char *get_new_game_desc(midend *me, new_game_desc_args *args, bool iterative, void *iterative_arg)
 {
     random_state *rs = random_new(args->seedstr, strlen(args->seedstr));
     /*
@@ -692,7 +699,29 @@ char *get_new_game_desc(midend *me, new_game_desc_args *args)
      * being used for bulk game generation, and hence we should
      * pass the non-interactive flag to new_desc.
      */
-    args->desc = me->ourgame->new_desc(args->params, rs, &args->aux, args->interactive);
+    if (me->ourgame->attempt_new_desc) {
+        desc_data dd = {args->params, rs, args->interactive, args->aux};
+        me->ourgame->initialise_desc_data(&dd);
+
+        bool solved = false;
+        int attempts = 0;
+        while (!solved) {
+            solved = me->ourgame->attempt_new_desc(&dd);
+            attempts++;
+            args->desc = dd.desc;
+            args->aux = dd.aux;
+            if (iterative) {
+                new_game_attempt(iterative_arg, me, args, attempts, solved);
+            }
+        }
+        me->ourgame->destroy_desc_data(&dd, true);
+
+        args->aux = dd.aux;
+        args->desc = dd.desc;
+    } else {
+        args->desc = me->ourgame->new_desc(args->params, rs, &args->aux, args->interactive);
+    }
+
     assert_printable_ascii(args->desc);
     random_free(rs);
 
@@ -715,7 +744,7 @@ void midend_create_game(midend *me)
             sfree(args.seedstr);
             args.seedstr = get_new_seedstr(me, NULL);
         }
-        args.desc = get_new_game_desc(me, &args);
+        args.desc = get_new_game_desc(me, &args, false, NULL);
     }
     midend_create_game_inner(me, &args);
 }
@@ -754,20 +783,28 @@ void midend_create_game_inner(midend *me, new_game_desc_args *args)
         if (me->genmode == GOT_SEED) {
             me->genmode = GOT_NOTHING;
         } else {
-            sfree(me->seedstr);
-            me->seedstr = args->seedstr;
-            if (me->curparams) {
-                me->ourgame->free_params(me->curparams);
+            if (me->seedstr != args->seedstr) {
+                sfree(me->seedstr);
+                me->seedstr = args->seedstr;
             }
-            me->curparams = args->params;
+            if (me->curparams != args->params) {
+                if (me->curparams) {
+                    me->ourgame->free_params(me->curparams);
+                }
+                me->curparams = args->params;
+            }
         }
 
-    	sfree(me->desc);
-    	sfree(me->privdesc);
-        sfree(me->aux_info);
-        me->aux_info = args->aux;
-        me->desc = args->desc;
-        me->privdesc = NULL;
+        if (me->desc != args->desc) {
+            sfree(me->desc);
+            me->desc = args->desc;
+            sfree(me->privdesc);
+            me->privdesc = NULL;
+        }
+        if (me->aux_info != args->aux) {
+            sfree(me->aux_info);
+            me->aux_info = args->aux;
+        }
     }
 
     ensure(me);

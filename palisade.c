@@ -751,8 +751,6 @@ static void destroy_desc_data(desc_data *dd, bool keep_outputs)
     if (!keep_outputs) {
         sfree(gdd->desc);
         sfree(gdd->soln);
-    } else {
-        dd->desc = sresize(dd->desc, strlen(dd->desc) + 1, char);
     }
     sfree(gdd);
     dd->game_desc_data = NULL;
@@ -769,7 +767,7 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 
     *aux = dd.aux;
 
-    return dd.desc;
+    return sresize(dd.desc, strlen(dd.desc) + 1, char);
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -1599,4 +1597,7 @@ const struct game thegame = {
     true,                                     /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,                                         /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
