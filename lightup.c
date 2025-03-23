@@ -393,9 +393,12 @@ static game_state *new_state(const game_params *params)
     return ret;
 }
 
-static game_state *dup_game(const game_state *state)
+static game_state *dup_game_reuse(const game_state *state, game_state *existing_result)
 {
-    game_state *ret = snew(game_state);
+    game_state *ret = existing_result;
+    if (!ret) {
+        ret = snew(game_state);
+    }
 
     ret->w = state->w;
     ret->h = state->h;
@@ -411,6 +414,11 @@ static game_state *dup_game(const game_state *state)
     ret->used_solve = state->used_solve;
 
     return ret;
+}
+
+static game_state *dup_game(const game_state *state)
+{
+    return dup_game_reuse(state, NULL);
 }
 
 static void free_game(game_state *state)
@@ -1538,43 +1546,70 @@ static bool puzzle_is_good(game_state *state, int difficulty)
 
 #define MAX_GRIDGEN_TRIES 20
 
-static char *new_game_desc(const game_params *params_in, random_state *rs,
-			   char **aux, bool interactive)
-{
-    game_params params_copy = *params_in; /* structure copy */
-    game_params *params = &params_copy;
-    game_state *news = new_state(params), *copys;
-    int i, j, run, x, y, wh = params->w*params->h, num;
-    char *ret, *p;
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    game_params params_copy;
+    game_state *news;
+    game_state *copys;
     int *numindices;
+    int tries;
+    char *desc;
+} game_desc_data;
 
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h;
+
+    gdd->params_copy = *gdd->params;
+    gdd->news = new_state(gdd->params);
+    gdd->copys = new_state(gdd->params);
     /* Construct a shuffled list of grid positions; we only
      * do this once, because if it gets used more than once it'll
      * be on a different grid layout. */
-    numindices = snewn(wh, int);
-    for (j = 0; j < wh; j++) numindices[j] = j;
-    shuffle(numindices, wh, sizeof(*numindices), rs);
+    gdd->numindices = snewn(wh, int);
+    for (int i = 0; i < wh; i++) gdd->numindices[i] = i;
+    gdd->tries = 0;
+    shuffle(gdd->numindices, wh, sizeof(*gdd->numindices), gdd->rs);
 
-    while (1) {
-        for (i = 0; i < MAX_GRIDGEN_TRIES; i++) {
+    dd->desc = gdd->desc = snewn(wh + 1, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    game_params *params = &gdd->params_copy;
+    game_state *news = gdd->news, *copys = gdd->copys;
+    int j, run, x, y, wh = params->w*params->h, num;
+    char *ret = gdd->desc, *p;
+    int *numindices = gdd->numindices;
+
+    bool solved = true;
+    {
+        if (gdd->tries < MAX_GRIDGEN_TRIES) {
+            gdd->tries++;
             set_blacks(news, params, rs); /* also cleans board. */
 
             /* set up lights and then the numbers, and remove the lights */
             place_lights(news, rs);
             debug(("Generating initial grid.\n"));
             place_numbers(news);
-            if (!puzzle_is_good(news, params->difficulty)) continue;
+            if (!puzzle_is_good(news, params->difficulty)) solved = false;
 
             /* Take a copy, remove numbers we didn't use and check there's
              * still a unique solution; if so, use the copy subsequently. */
-            copys = dup_game(news);
+            dup_game_reuse(news, copys);
             strip_unused_nums(copys);
             if (!puzzle_is_good(copys, params->difficulty)) {
                 debug(("Stripped grid is not good, reverting.\n"));
-                free_game(copys);
             } else {
-                free_game(news);
-                news = copys;
+                dup_game_reuse(copys, news);
             }
 
             /* Go through grid removing numbers at random one-by-one and
@@ -1597,24 +1632,22 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
                  * Check we can't solve it with a more simplistic solver. */
                 if (puzzle_is_good(news, params->difficulty-1)) {
                     debug(("Maximally-hard puzzle still not hard enough, skipping.\n"));
-                    continue;
+                    solved = false;
                 }
             }
-
-            goto goodpuzzle;
+        } else {
+            /* Couldn't generate a good puzzle in however many goes. Ramp up the
+             * %age of black squares (if we didn't already have lots; in which case
+             * why couldn't we generate a puzzle?) and try again. */
+            if (params->blackpc < 90) params->blackpc += 5;
+            gdd->tries = 0;
+            debug(("New black layout %d%%.\n", params->blackpc));
         }
-        /* Couldn't generate a good puzzle in however many goes. Ramp up the
-         * %age of black squares (if we didn't already have lots; in which case
-         * why couldn't we generate a puzzle?) and try again. */
-        if (params->blackpc < 90) params->blackpc += 5;
-        debug(("New black layout %d%%.\n", params->blackpc));
     }
-goodpuzzle:
     /* Game is encoded as a long string one character per square;
      * 'S' is a space
      * 'B' is a black square with no number
      * '0', '1', '2', '3', '4' is a black square with a number. */
-    ret = snewn((params->w * params->h) + 1, char);
     p = ret;
     run = 0;
     for (y = 0; y < params->h; y++) {
@@ -1643,12 +1676,38 @@ goodpuzzle:
     }
     *p = '\0';
     assert(p - ret <= params->w * params->h);
-    free_game(news);
-    sfree(numindices);
 
-    return ret;
+    return solved;
 }
 
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    free_game(gdd->news);
+    free_game(gdd->copys);
+    sfree(gdd->numindices);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
+}
 static const char *validate_desc(const game_params *params, const char *desc)
 {
     int i;
@@ -2402,6 +2461,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER
