@@ -2223,14 +2223,32 @@ static bool alloc_try_hard(struct alloc_scratch *as, random_state *rs)
     return ok;
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    char *aux;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
-    int n = params->n, w = n+2, h = n+1, wh = w*h, diff = params->diff;
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+    int n = dd->params->n, w = n+2, h = n+1, wh = w*h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    dd->desc = gdd->desc = NULL;
+    dd->aux = gdd->aux = snewn(wh+1, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    random_state *rs = dd->rs;
+    int n = dd->params->n, w = n+2, h = n+1, wh = w*h, diff = dd->params->diff;
     struct solver_scratch *sc;
     struct alloc_scratch *as;
     int i, j, k, len;
-    char *ret;
 
 #ifndef OMIT_DIFFICULTY_CAP
     /*
@@ -2283,45 +2301,45 @@ static char *new_game_desc(const game_params *params, random_state *rs,
      * and 26 respectively, which is a lot more sensible.
      */
 
-    while (1) {
-        alloc_make_layout(as, rs);
+    bool solved = true, can_be_solved = true;
+    alloc_make_layout(as, rs);
 
-        if (diff == DIFF_AMBIGUOUS) {
-            /* Just assign numbers to each domino completely at random. */
-            alloc_trivial(as, rs);
-        } else if (diff < DIFF_HARD) {
-            /* Try to rule out the most common case of a non-unique solution */
-            if (!alloc_try_unique(as, rs))
-                continue;
-        } else {
-            /*
-             * For Hard puzzles and above, we'd like there not to be
-             * any easy toehold to start with.
-             *
-             * Mostly, that's arranged by alloc_try_hard, which will
-             * ensure that no domino starts off with only one
-             * potential placement. But a few other deductions
-             * possible at Basic level can still sneak through the
-             * cracks - for example, if the only two placements of one
-             * domino overlap in a square, and you therefore rule out
-             * some other domino that can use that square, you might
-             * then find that _that_ domino now has only one
-             * placement, and you've made a start.
-             *
-             * Of course, the main difficulty-level check will still
-             * guarantee that you have to do a harder deduction
-             * _somewhere_ in the grid. But it's more elegant if
-             * there's nowhere obvious to get started at all.
-             */
-            int di;
-            bool ok;
+    if (diff == DIFF_AMBIGUOUS) {
+        /* Just assign numbers to each domino completely at random. */
+        alloc_trivial(as, rs);
+    } else if (diff < DIFF_HARD) {
+        /* Try to rule out the most common case of a non-unique solution */
+        if (!alloc_try_unique(as, rs))
+            solved = can_be_solved = false;
+    } else {
+        /*
+         * For Hard puzzles and above, we'd like there not to be
+         * any easy toehold to start with.
+         *
+         * Mostly, that's arranged by alloc_try_hard, which will
+         * ensure that no domino starts off with only one
+         * potential placement. But a few other deductions
+         * possible at Basic level can still sneak through the
+         * cracks - for example, if the only two placements of one
+         * domino overlap in a square, and you therefore rule out
+         * some other domino that can use that square, you might
+         * then find that _that_ domino now has only one
+         * placement, and you've made a start.
+         *
+         * Of course, the main difficulty-level check will still
+         * guarantee that you have to do a harder deduction
+         * _somewhere_ in the grid. But it's more elegant if
+         * there's nowhere obvious to get started at all.
+         */
+        int di;
+        bool ok;
 
-            if (!alloc_try_hard(as, rs))
-                continue;
-
+        if (!alloc_try_hard(as, rs))
+            solved = can_be_solved = false;
+        else {
             solver_setup_grid(sc, as->numbers);
             if (run_solver(sc, DIFF_BASIC) < 2)
-                continue;
+                solved = can_be_solved = false;
 
             ok = true;
             for (di = 0; di < sc->dc; di++)
@@ -2331,21 +2349,19 @@ static char *new_game_desc(const game_params *params, random_state *rs,
                 }
 
             if (!ok) {
-                continue;
+                solved = can_be_solved = false;
             }
         }
+    }
 
-        if (diff != DIFF_AMBIGUOUS) {
-            int solver_result;
-            solver_setup_grid(sc, as->numbers);
-            solver_result = run_solver(sc, diff);
-            if (solver_result > 1)
-                continue; /* puzzle couldn't be solved at this difficulty */
-            if (sc->max_diff_used < diff)
-                continue; /* puzzle _could_ be solved at easier difficulty */
-        }
-
-        break;
+    if (diff != DIFF_AMBIGUOUS && can_be_solved) {
+        int solver_result;
+        solver_setup_grid(sc, as->numbers);
+        solver_result = run_solver(sc, diff);
+        if (solver_result > 1)
+            solved = false; /* puzzle couldn't be solved at this difficulty */
+        if (sc->max_diff_used < diff)
+            solved = false; /* puzzle _could_ be solved at easier difficulty */
     }
 
 #ifdef GENERATION_DIAGNOSTICS
@@ -2388,39 +2404,63 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     /*
      * Now actually encode the string.
      */
-    ret = snewn(len+1, char);
+    dd->desc = snewn(len+1, char);
     j = 0;
     for (i = 0; i < wh; i++) {
         k = as->numbers[i];
         if (k < 10)
-            ret[j++] = '0' + k;
+            dd->desc[j++] = '0' + k;
         else
-            j += sprintf(ret+j, "[%d]", k);
+            j += sprintf(dd->desc+j, "[%d]", k);
         assert(j <= len);
     }
-    assert(j == len);
-    ret[j] = '\0';
+    assert(j <= len);
+    dd->desc[j] = '\0';
 
     /*
      * Encode the solved state as an aux_info.
      */
     {
-	char *auxinfo = snewn(wh+1, char);
-
-	for (i = 0; i < wh; i++) {
-	    int v = as->layout[i];
-	    auxinfo[i] = (v == i+1 ? 'L' : v == i-1 ? 'R' :
-			  v == i+w ? 'T' : v == i-w ? 'B' : '.');
-	}
-	auxinfo[wh] = '\0';
-
-	*aux = auxinfo;
+        for (i = 0; i < wh; i++) {
+            int v = as->layout[i];
+            dd->aux[i] = (v == i+1 ? 'L' : v == i-1 ? 'R' :
+                  v == i+w ? 'T' : v == i-w ? 'B' : '.');
+        }
+        dd->aux[wh] = '\0';
     }
 
     solver_free_scratch(sc);
     alloc_free_scratch(as);
 
-    return ret;
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+			   char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -3462,6 +3502,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER
