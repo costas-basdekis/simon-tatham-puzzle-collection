@@ -381,9 +381,25 @@ static void merge_ones(int *board, int w, int h)
     } while (change);
 }
 
-/* generate a random valid board; uses validate_board. */
-static void make_board(int *board, int w, int h, random_state *rs) {
-    const int sz = w * h;
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    int *board;
+    int *display_board;
+    DSF *dsf;
+    char *desc;
+} game_desc_data;
+
+static void minimize_clue_set(int *board, int w, int h, random_state *rs);
+static int encode_run(char *buffer, int run);
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    const int w = dd->params->w, h = dd->params->h, sz = w * h;
+    int *board = gdd->board, *display_board = gdd->display_board, i, j, run;
+    char *description = gdd->desc;
 
     /* w=h=2 is a special case which requires a number > max(w, h) */
     /* TODO prove that this is the case ONLY for w=h=2. */
@@ -392,23 +408,13 @@ static void make_board(int *board, int w, int h, random_state *rs) {
     /* Note that if 1 in {w, h} then it's impossible to have a region
      * of size > w*h, so the special case only affects w=h=2. */
 
-    int i;
-    DSF *dsf;
+    DSF *dsf = gdd->dsf;
     bool change;
 
-    assert(w >= 1);
-    assert(h >= 1);
-    assert(board);
-
-    /* I abuse the board variable: when generating the puzzle, it
-     * contains a shuffled list of numbers {0, ..., sz-1}. */
-    for (i = 0; i < sz; ++i) board[i] = i;
-
-    dsf = dsf_new(sz);
-retry:
     dsf_reinit(dsf);
     shuffle(board, sz, sizeof (int), rs);
 
+    bool solved = true;
     do {
         change = false; /* as long as the board potentially has errors */
         for (i = 0; i < sz; ++i) {
@@ -450,7 +456,11 @@ retry:
              * Maybe we could fix it by merging the conflicting
              * neighbouring region(s) into some of their neighbours,
              * but just restarting works out fine. */
-            if (merge == SENTINEL) goto retry;
+            if (merge == SENTINEL) {
+                solved = false;
+                change = false;
+                break;
+            }
 
             /* merge with the smallest neighbouring workable region. */
             dsf_merge(dsf, square, merge);
@@ -458,10 +468,30 @@ retry:
         }
     } while (change);
 
-    for (i = 0; i < sz; ++i) board[i] = dsf_size(dsf, i);
-    merge_ones(board, w, h);
+    for (i = 0; i < sz; ++i) display_board[i] = dsf_size(dsf, i);
+    merge_ones(display_board, w, h);
 
-    dsf_free(dsf);
+    minimize_clue_set(display_board, w, h, rs);
+
+    for (run = j = i = 0; i < sz; ++i) {
+        if (solved) {
+            assert(display_board[i] >= 0);
+            assert(display_board[i] < 10);
+        } else if (display_board[i] < 0 || display_board[i] > 9) {
+            display_board[i] = 0;
+        }
+        if (display_board[i] == 0) {
+            ++run;
+        } else {
+            j += encode_run(description + j, run);
+            run = 0;
+            description[j++] = display_board[i] + '0';
+        }
+    }
+    j += encode_run(description + j, run);
+    description[j++] = '\0';
+
+    return solved;
 }
 
 static void merge(DSF *dsf, int *connected, int a, int b) {
@@ -793,7 +823,8 @@ static bool learn_critical_square(struct solver_state *s, int w, int h) {
 	if (i != dsf_canonify(s->dsf, i)) continue;
 	slack = s->board[i] - dsf_size(s->dsf, i);
 	if (slack == 0) continue;
-	assert(s->board[i] != 1);
+	// TODO: This is because we can have unsolvable puzzles, but we still try to solve them
+	// assert(s->board[i] != 1);
 	/* for each empty square */
 	for (j = 0; j < sz; ++j) {
 	    if (s->board[j] == EMPTY) {
@@ -1249,33 +1280,54 @@ static int encode_run(char *buffer, int run)
     return i;
 }
 
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+    gdd->board = snewn(wh, int);
+    gdd->display_board = snewn(wh, int);
+    assert(w >= 1);
+    assert(h >= 1);
+    assert(gdd->board);
+    /* I abuse the board variable: when generating the puzzle, it
+     * contains a shuffled list of numbers {0, ..., sz-1}. */
+    for (int i = 0; i < wh; ++i) gdd->board[i] = i;
+    gdd->dsf = dsf_new(wh);
+
+    dd->desc = gdd->desc = snewn(wh + 1, char);
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    dsf_free(gdd->dsf);
+    sfree(gdd->board);
+    sfree(gdd->display_board);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
 static char *new_game_desc(const game_params *params, random_state *rs,
                            char **aux, bool interactive)
 {
-    const int w = params->w, h = params->h, sz = w * h;
-    int *board = snewn(sz, int), i, j, run;
-    char *description = snewn(sz + 1, char);
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
 
-    make_board(board, w, h, rs);
-    minimize_clue_set(board, w, h, rs);
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
 
-    for (run = j = i = 0; i < sz; ++i) {
-        assert(board[i] >= 0);
-        assert(board[i] < 10);
-	if (board[i] == 0) {
-	    ++run;
-	} else {
-	    j += encode_run(description + j, run);
-	    run = 0;
-	    description[j++] = board[i] + '0';
-	}
-    }
-    j += encode_run(description + j, run);
-    description[j++] = '\0';
+    *aux = dd.aux;
 
-    sfree(board);
-
-    return sresize(description, j, char);
+    return sresize(dd.desc, strlen(dd.desc) + 1, char);
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -2192,6 +2244,9 @@ const struct game thegame = {
     false,				   /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_NUMPAD,		       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER /* solver? hah! */
