@@ -663,26 +663,55 @@ static bool solve_puzzle(const game_state *state, unsigned char *grid,
     return ok;
 }
 
-#ifndef STANDALONE_PICTURE_GENERATOR
-static unsigned char *generate_soluble(random_state *rs, int w, int h)
-{
-    int i, j, max;
-    bool ok;
-    unsigned char *grid, *matrix, *workspace;
-    unsigned int *changed_h, *changed_w;
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    unsigned char *grid;
+    unsigned char *matrix;
+    unsigned char *workspace;
+    unsigned int *changed_h;
+    unsigned int *changed_w;
     int *rowdata;
+    int desc_len;
+    char *desc;
+    char *aux;
+} game_desc_data;
 
-    max = max(w, h);
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
 
-    grid = snewn(w*h, unsigned char);
+    int w = dd->params->w, h = dd->params->h, wh = w * h, max = max(w, h);
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->grid = snewn(w*h, unsigned char);
     /* Allocate this here, to avoid having to reallocate it again for every geneerated grid */
-    matrix = snewn(w*h, unsigned char);
-    workspace = snewn(max*7, unsigned char);
-    changed_h = snewn(max+1, unsigned int);
-    changed_w = snewn(max+1, unsigned int);
-    rowdata = snewn(max+1, int);
+    gdd->matrix = snewn(w*h, unsigned char);
+    gdd->workspace = snewn(max*7, unsigned char);
+    gdd->changed_h = snewn(max+1, unsigned int);
+    gdd->changed_w = snewn(max+1, unsigned int);
+    gdd->rowdata = snewn(max+1, int);
 
-    do {
+    gdd->desc_len = wh;
+    dd->desc = gdd->desc = snewn(gdd->desc_len, char);
+    dd->aux = gdd->aux = snewn(wh + 2, char);
+}
+
+#ifndef STANDALONE_PICTURE_GENERATOR
+static bool generate_soluble(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    int w = gdd->params->w, h = gdd->params->h, wh = w * h, max = max(w, h);
+    int i, j;
+    bool ok;
+    unsigned char *grid = gdd->grid, *matrix = gdd->matrix, *workspace = gdd->workspace;
+    unsigned int *changed_h = gdd->changed_h, *changed_w = gdd->changed_w;
+    int *rowdata = gdd->rowdata;
+
+    {
         generate(rs, w, h, grid);
 
         /*
@@ -710,19 +739,13 @@ static unsigned char *generate_soluble(random_state *rs, int w, int h)
                     ok = false;
             }
         }
-        if (!ok)
-            continue;
+        if (ok) {
+            ok = solve_puzzle(NULL, grid, w, h, matrix, workspace,
+                              changed_h, changed_w, rowdata, 0);
+        }
+    }
 
-	ok = solve_puzzle(NULL, grid, w, h, matrix, workspace,
-			  changed_h, changed_w, rowdata, 0);
-    } while (!ok);
-
-    sfree(matrix);
-    sfree(workspace);
-    sfree(changed_h);
-    sfree(changed_w);
-    sfree(rowdata);
-    return grid;
+    return ok;
 }
 #endif
 
@@ -730,11 +753,12 @@ static unsigned char *generate_soluble(random_state *rs, int w, int h)
 static unsigned char *picture;
 #endif
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+static bool attempt_new_desc(desc_data *dd)
 {
-    unsigned char *grid;
-    int i, j, max, rowlen, *rowdata;
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    unsigned char *grid = gdd->grid;
+    int i, j, max, rowlen, *rowdata = gdd->rowdata;
     char intbuf[80], *desc;
     int desclen, descpos;
 #ifdef STANDALONE_PICTURE_GENERATOR
@@ -742,7 +766,9 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     int *index;
 #endif
 
-    max = max(params->w, params->h);
+    max = max(gdd->params->w, gdd->params->h);
+
+    bool solved;
 
 #ifdef STANDALONE_PICTURE_GENERATOR
     /*
@@ -786,30 +812,26 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         sfree(rowdata);
         sfree(matrix);
     }
+    solved = true;
 #else
-    grid = generate_soluble(rs, params->w, params->h);
+    solved = generate_soluble(dd);
 #endif
-    rowdata = snewn(max, int);
 
     /*
      * Save the solved game in aux.
      */
-    if (aux) {
-	char *ai = snewn(params->w * params->h + 2, char);
-
+    {
         /*
          * String format is exactly the same as a solve move, so we
          * can just dupstr this in solve_game().
          */
 
-        ai[0] = 'S';
+        gdd->aux[0] = 'S';
 
-        for (i = 0; i < params->w * params->h; i++)
-            ai[i+1] = grid[i] ? '1' : '0';
+        for (i = 0; i < gdd->params->w * gdd->params->h; i++)
+            gdd->aux[i+1] = grid[i] ? '1' : '0';
 
-        ai[params->w * params->h + 1] = '\0';
-
-	*aux = ai;
+        gdd->aux[gdd->params->w * gdd->params->h + 1] = '\0';
     }
 
     /*
@@ -837,7 +859,11 @@ static char *new_game_desc(const game_params *params, random_state *rs,
             desclen++;
         }
     }
-    desc = snewn(desclen, char);
+    desc = gdd->desc;
+    if (desclen > gdd->desc_len) {
+        gdd->desc_len = desclen;
+        dd->desc = gdd->desc = sresize(desc, desclen, char);
+    }
     descpos = 0;
     for (i = 0; i < params->w + params->h; i++) {
         if (i < params->w)
@@ -895,9 +921,43 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     sfree(state->common);
     sfree(state);
 #endif
-    sfree(rowdata);
-    sfree(grid);
-    return desc;
+
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->grid);
+    sfree(gdd->matrix);
+    sfree(gdd->workspace);
+    sfree(gdd->changed_h);
+    sfree(gdd->changed_w);
+    sfree(gdd->rowdata);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -2123,6 +2183,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON,		       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER
