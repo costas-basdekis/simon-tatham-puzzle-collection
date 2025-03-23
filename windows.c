@@ -1473,6 +1473,8 @@ typedef struct get_new_game_desc_args {
     midend *me;
     frontend *fe;
     new_game_desc_args *args;
+    clock_t start_time;
+    clock_t last_display_time;
     int attempts;
     bool solved;
 } get_new_game_desc_args;
@@ -1635,6 +1637,8 @@ void get_new_game_desc_async(midend *me, frontend *fe, new_game_desc_args *args)
     thread_args->me = me;
     thread_args->fe = fe;
     thread_args->args = args;
+    thread_args->start_time = clock();
+    thread_args->last_display_time = 0;
     thread_args->attempts = 0;
     thread_args->solved = false;
     fe->current_thread_args = thread_args;
@@ -3354,10 +3358,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT message,
 		case WM_NEW_GAME_ATTEMPT:
 		{
 			get_new_game_desc_args *thread_args = (get_new_game_desc_args*)wParam;
-			new_game_async_attempt(thread_args->me, thread_args->args);
-			char buf[64];
-			sprintf(buf, "Creating game, %d attempts so far...", thread_args->attempts);
-			SetWindowText(fe->stop_new_game_label, buf);
+	  		clock_t now = clock();
+	  		long display_time_diff_ms = (now - thread_args->last_display_time) * 1000 / CLOCKS_PER_SEC;
+	  	    if (display_time_diff_ms >= 500) {
+	  	    	thread_args->last_display_time = now;
+	  	    	new_game_async_attempt(thread_args->me, thread_args->args);
+	  	    	char buf[64];
+	  	    	sprintf(buf, "Creating game, %d seconds and %d attempts so far...",
+	  	    		(now - thread_args->start_time) / CLOCKS_PER_SEC, thread_args->attempts);
+	  	    	SetWindowText(fe->stop_new_game_label, buf);
+	  	    }
 			break;
 		}
     }
