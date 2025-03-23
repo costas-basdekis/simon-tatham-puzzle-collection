@@ -316,15 +316,45 @@ static const char *validate_params(const game_params *params, bool full)
     return NULL;
 }
 
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    int *grid;
+    int *list;
+    int *grid2;
+    char *buf;
+    int desc_size;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->grid = snewn(wh, int);
+    gdd->list = snewn(wh + w, int);
+    gdd->grid2 = snewn(wh, int);
+
+    gdd->buf = snewn(80, char);
+    gdd->desc_size = wh;
+    dd->desc = gdd->desc = snewn(gdd->desc_size, char);
+}
+
 /*
  * Guaranteed-soluble grid generator.
  */
-static void gen_grid(int w, int h, int nc, int *grid, random_state *rs)
+static bool gen_grid(desc_data* dd)
 {
-    int wh = w*h, tc = nc+1;
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    int w = gdd->params->w, h = gdd->params->h, wh = w * h, nc = gdd->params->ncols, tc = nc+1;
     int i, j, k, c, x, y, pos, n;
-    int *list, *grid2;
-    bool ok;
+    int *grid = gdd->grid, *list = gdd->list, *grid2 = gdd->grid2;
     int failures = 0;
 
     /*
@@ -338,10 +368,9 @@ static void gen_grid(int w, int h, int nc, int *grid, random_state *rs)
      * we can't insert a column if there are already w; so there
      * are a maximum of w new columns too. Total is wh + w.
      */
-    list = snewn(wh + w, int);
-    grid2 = snewn(wh, int);
 
-    do {
+    bool solved = true;
+    {
         /*
          * Start with two or three squares - depending on parity of w*h
          * - of a random colour.
@@ -838,10 +867,9 @@ static void gen_grid(int w, int h, int nc, int *grid, random_state *rs)
                 break;
         }
 
-        ok = true;
         for (i = 0; i < wh; i++)
             if (grid[i] == 0) {
-                ok = false;
+                solved = false;
                 failures++;
 #if defined GENERATION_DIAGNOSTICS || defined SHOW_INCOMPLETE
                 {
@@ -861,7 +889,7 @@ static void gen_grid(int w, int h, int nc, int *grid, random_state *rs)
                 break;
             }
 
-    } while (!ok);
+    };
 
 #if defined GENERATION_DIAGNOSTICS || defined COUNT_FAILURES
     printf("%d failures\n", failures);
@@ -880,9 +908,7 @@ static void gen_grid(int w, int h, int nc, int *grid, random_state *rs)
         }
     }
 #endif
-
-    sfree(grid2);
-    sfree(list);
+    return solved;
 }
 
 /*
@@ -921,35 +947,69 @@ static void gen_grid_random(int w, int h, int nc, int *grid, random_state *rs)
     }
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+static bool attempt_new_desc(desc_data *dd)
 {
-    char *ret;
-    int n, i, retlen, *tiles;
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
+    char *ret = gdd->desc;
+    int n, i, retlen, *tiles = gdd->grid;
 
     n = params->w * params->h;
-    tiles = snewn(n, int);
 
+    bool solved = true;
     if (params->soluble)
-	gen_grid(params->w, params->h, params->ncols, tiles, rs);
+	solved = gen_grid(dd);
     else
 	gen_grid_random(params->w, params->h, params->ncols, tiles, rs);
 
-    ret = NULL;
     retlen = 0;
     for (i = 0; i < n; i++) {
-	char buf[80];
+	char *buf = gdd->buf;
 	int k;
 
 	k = sprintf(buf, "%d,", tiles[i]);
-	ret = sresize(ret, retlen + k + 1, char);
+        if (retlen + k + 1 > gdd->desc_size) {
+            gdd->desc_size = retlen + k + 1;
+            dd->desc = gdd->desc = ret = sresize(gdd->desc, gdd->desc_size, char);
+        }
 	strcpy(ret + retlen, buf);
 	retlen += k;
     }
     ret[retlen-1] = '\0'; /* delete last comma */
 
-    sfree(tiles);
-    return ret;
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->grid);
+    sfree(gdd->list);
+    sfree(gdd->grid2);
+    sfree(gdd->buf);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -1682,4 +1742,7 @@ const struct game thegame = {
     true,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
