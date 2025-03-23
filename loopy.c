@@ -345,29 +345,59 @@ static grid *loopy_generate_grid(const game_params *params,
  * General struct manipulation and other straightforward code
  */
 
-static game_state *dup_game(const game_state *state)
+static game_state *dup_game_reuse(const game_state *state, game_state *existing_state)
 {
-    game_state *ret = snew(game_state);
+    game_state *ret = existing_state;
+    int num_faces = 0, num_edges = 0;
+    if (!ret) {
+        ret = snew(game_state);
+        ret->game_grid = NULL;
+        ret->clues = NULL;
+        ret->lines = NULL;
+        ret->line_errors = NULL;
+    } else {
+        num_faces = ret->game_grid->num_faces;
+        num_edges = ret->game_grid->num_edges;
+    }
 
-    ret->game_grid = state->game_grid;
-    ret->game_grid->refcount++;
+    if (ret->game_grid != state->game_grid) {
+        if (ret->game_grid) {
+            ret->game_grid->refcount--;
+        }
+        ret->game_grid = state->game_grid;
+        ret->game_grid->refcount++;
+    }
 
     ret->solved = state->solved;
     ret->cheated = state->cheated;
 
-    ret->clues = snewn(state->game_grid->num_faces, signed char);
+    if (num_faces < state->game_grid->num_faces) {
+        sfree(ret->clues);
+        ret->clues = snewn(state->game_grid->num_faces, signed char);
+    }
     memcpy(ret->clues, state->clues, state->game_grid->num_faces);
 
-    ret->lines = snewn(state->game_grid->num_edges, char);
+    if (num_edges < state->game_grid->num_edges) {
+        sfree(ret->lines);
+        ret->lines = snewn(state->game_grid->num_edges, char);
+    }
     memcpy(ret->lines, state->lines, state->game_grid->num_edges);
 
-    ret->line_errors = snewn(state->game_grid->num_edges, bool);
+    if (num_edges < state->game_grid->num_edges) {
+        sfree(ret->line_errors);
+        ret->line_errors = snewn(state->game_grid->num_edges, bool);
+    }
     memcpy(ret->line_errors, state->line_errors,
            state->game_grid->num_edges * sizeof(bool));
     ret->exactly_one_loop = state->exactly_one_loop;
 
     ret->grid_type = state->grid_type;
     return ret;
+}
+
+static game_state *dup_game(const game_state *state)
+{
+    return dup_game_reuse(state, NULL);
 }
 
 static void free_game(game_state *state)
@@ -1475,12 +1505,12 @@ static bool game_has_unique_soln(const game_state *state, int diff)
 
 
 /* Remove clues one at a time at random. */
-static game_state *remove_clues(game_state *state, random_state *rs,
-                                int diff)
+static game_state *remove_clues_reuse(game_state *state, random_state *rs,
+                                int diff, game_state *existing_state)
 {
     int *face_list;
     int num_faces = state->game_grid->num_faces;
-    game_state *ret = dup_game(state), *saved_ret;
+    game_state *ret = dup_game_reuse(state, existing_state), *saved_ret;
     int n;
 
     /* We need to remove some clues.  We'll do this by forming a list of all
@@ -1501,8 +1531,7 @@ static game_state *remove_clues(game_state *state, random_state *rs,
         if (game_has_unique_soln(ret, diff)) {
             free_game(saved_ret);
         } else {
-            free_game(ret);
-            ret = saved_ret;
+            dup_game_reuse(saved_ret, ret);
         }
     }
     sfree(face_list);
@@ -1510,27 +1539,47 @@ static game_state *remove_clues(game_state *state, random_state *rs,
     return ret;
 }
 
-
-static char *new_game_desc(const game_params *params, random_state *rs,
-                           char **aux, bool interactive)
-{
-    /* solution and description both use run-length encoding in obvious ways */
-    char *retval, *game_desc, *grid_desc;
-    grid *g;
-    game_state *state = snew(game_state);
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    char *grid_desc;
+    game_state *state;
     game_state *state_new;
+    char *desc;
+} game_desc_data;
 
-    grid_desc = grid_new_desc(grid_types[params->type], params->w, params->h, rs);
-    state->game_grid = g = loopy_generate_grid(params, grid_desc);
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
 
-    state->clues = snewn(g->num_faces, signed char);
-    state->lines = snewn(g->num_edges, char);
-    state->line_errors = snewn(g->num_edges, bool);
-    state->exactly_one_loop = false;
+    int w = dd->params->w, h = dd->params->h, wh = w * h;
 
-    state->grid_type = params->type;
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
 
-    newboard_please:
+    gdd->state = snew(game_state);
+    gdd->grid_desc = grid_new_desc(grid_types[gdd->params->type], w, h, gdd->rs);
+    gdd->state->game_grid = loopy_generate_grid(gdd->params, gdd->grid_desc);
+    gdd->state->clues = snewn(gdd->state->game_grid->num_faces, signed char);
+    gdd->state->lines = snewn(gdd->state->game_grid->num_edges, char);
+    gdd->state->line_errors = snewn(gdd->state->game_grid->num_edges, bool);
+    gdd->state->exactly_one_loop = false;
+    gdd->state->grid_type = gdd->params->type;
+    gdd->state_new = dup_game(gdd->state);
+
+    dd->desc = gdd->desc = NULL;
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
+    /* solution and description both use run-length encoding in obvious ways */
+    char *retval, *game_desc, *grid_desc = gdd->grid_desc;
+    grid *g = gdd->state->game_grid;
+    game_state *state = gdd->state;
+    game_state *state_new = gdd->state_new;
 
     memset(state->lines, LINE_UNKNOWN, g->num_edges);
     memset(state->line_errors, 0, g->num_edges * sizeof(bool));
@@ -1541,30 +1590,24 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     /* Get a new random solvable board with all its clues filled in.  Yes, this
      * can loop for ever if the params are suitably unfavourable, but
      * preventing games smaller than 4x4 seems to stop this happening */
-    do {
-        add_full_clues(state, rs);
-    } while (!game_has_unique_soln(state, params->diff));
+    add_full_clues(state, rs);
+    bool solved = game_has_unique_soln(state, params->diff);
 
-    state_new = remove_clues(state, rs, params->diff);
-    free_game(state);
-    state = state_new;
-
+    remove_clues_reuse(state, rs, params->diff, state_new);
+    dup_game_reuse(state_new, state);
 
     if (params->diff > 0 && game_has_unique_soln(state, params->diff-1)) {
 #ifdef SHOW_WORKING
         fprintf(stderr, "Rejecting board, it is too easy\n");
 #endif
-        goto newboard_please;
+        solved = false;
     }
 
     game_desc = state_to_text(state);
 
-    free_game(state);
-
     if (grid_desc) {
         retval = snewn(strlen(grid_desc) + 1 + strlen(game_desc) + 1, char);
         sprintf(retval, "%s%c%s", grid_desc, (int)GRID_DESC_SEP, game_desc);
-        sfree(grid_desc);
         sfree(game_desc);
     } else {
         retval = game_desc;
@@ -1572,7 +1615,37 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 
     assert(!validate_desc(params, retval));
 
-    return retval;
+    dd->desc = gdd->desc = retval;
+
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->grid_desc);
+    free_game(gdd->state);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static game_state *new_game(midend *me, const game_params *params,
@@ -3777,6 +3850,9 @@ const struct game thegame = {
     false /* wants_statusbar */,
     false, NULL,                       /* timing_state */
     0,                                       /* mouse_priorities */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER
