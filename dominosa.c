@@ -2849,7 +2849,7 @@ static char *interpret_move(const game_state *state, game_ui *ui,
 
         sprintf(buf, "%c%d,%d", (int)(button == CURSOR_SELECT2 ? 'E' : 'D'), d1, d2);
         return dupstr(buf);
-    } else if (isdigit(button)) {
+    } else if (isdigit((unsigned char)button)) {
         int n = state->params.n, num = button - '0';
         if (num > n) {
             return MOVE_UNUSED;
