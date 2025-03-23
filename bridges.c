@@ -827,14 +827,13 @@ static const char *validate_params(const game_params *params, bool full)
 
 /* --- Game encoding and differences --- */
 
-static char *encode_game(game_state *state)
+static char *encode_game(game_state *state, char *desc)
 {
-    char *ret, *p;
+    char *p;
     int wh = state->w*state->h, run, x, y;
     struct island *is;
 
-    ret = snewn(wh + 1, char);
-    p = ret;
+    p = desc;
     run = 0;
     for (y = 0; y < state->h; y++) {
         for (x = 0; x < state->w; x++) {
@@ -862,9 +861,9 @@ static char *encode_game(game_state *state)
         run = 0;
     }
     *p = '\0';
-    assert(p - ret <= wh);
+    assert(p - desc <= wh);
 
-    return ret;
+    return desc;
 }
 
 static char *game_state_diff(const game_state *src, const game_state *dest)
@@ -1847,24 +1846,36 @@ static void free_game(game_state *state)
 
 #define ORDER(a,b) do { if (a < b) { int tmp=a; int a=b; int b=tmp; } } while(0)
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+    gdd->desc = dd->desc = snewn(dd->params->w * dd->params->h + 1, char);
+    gdd->desc[0] = '\0';
+}
+
+static game_state *execute_move(const game_state *state, const char *move);
+
+static bool attempt_new_desc(desc_data *dd) {
     game_state *tobuild  = NULL;
-    int i, j, wh = params->w * params->h, x, y, dx, dy;
+    int i, j, wh = dd->params->w * dd->params->h, x, y, dx, dy;
     int minx, miny, maxx, maxy, joinx, joiny, newx, newy, diffx, diffy;
-    int ni_req = max((params->islands * wh) / 100, MIN_SENSIBLE_ISLANDS), ni_curr, ni_bad;
+    int ni_req = max((dd->params->islands * wh) / 100, MIN_SENSIBLE_ISLANDS), ni_curr, ni_bad;
     struct island *is, *is2;
-    char *ret;
     unsigned int echeck;
 
     /* pick a first island position randomly. */
-generate:
-    if (tobuild) free_game(tobuild);
-    tobuild = new_state(params);
+    tobuild = new_state(dd->params);
 
-    x = random_upto(rs, params->w);
-    y = random_upto(rs, params->h);
+    x = random_upto(dd->rs, dd->params->w);
+    y = random_upto(dd->rs, dd->params->h);
     island_add(tobuild, x, y, 0);
     ni_curr = 1;
     ni_bad = 0;
@@ -1872,11 +1883,11 @@ generate:
 
     while (ni_curr < ni_req) {
         /* Pick a random island to try and extend from. */
-        i = random_upto(rs, tobuild->n_islands);
+        i = random_upto(dd->rs, tobuild->n_islands);
         is = &tobuild->islands[i];
 
         /* Pick a random direction to extend in. */
-        j = random_upto(rs, is->adj.npoints);
+        j = random_upto(dd->rs, is->adj.npoints);
         dx = is->adj.points[j].x - is->x;
         dy = is->adj.points[j].y - is->y;
 
@@ -1889,7 +1900,7 @@ generate:
             goto bad;
         }
         while (1) {
-            if (x < 0 || x >= params->w || y < 0 || y >= params->h) {
+            if (x < 0 || x >= dd->params->w || y < 0 || y >= dd->params->h) {
                 /* got past the edge; put a possible at the island
                  * and exit. */
                 maxx = x-dx; maxy = y-dy;
@@ -1916,8 +1927,8 @@ foundmax:
         /* Now we know where we could either put a new island
          * (between min and max), or (if loops are allowed) could join on
          * to an existing island (at join). */
-        if (params->allowloops && joinx != -1 && joiny != -1) {
-            if (random_upto(rs, 100) < (unsigned long)params->expansion) {
+        if (dd->params->allowloops && joinx != -1 && joiny != -1) {
+            if (random_upto(dd->rs, 100) < (unsigned long)dd->params->expansion) {
                 is2 = INDEX(tobuild, gridi, joinx, joiny);
                 debug(("Joining island at (%d,%d) to (%d,%d).\n",
                        is->x, is->y, is2->x, is2->y));
@@ -1927,12 +1938,12 @@ foundmax:
         diffx = (maxx - minx) * dx;
         diffy = (maxy - miny) * dy;
         if (diffx < 0 || diffy < 0)  goto bad;
-        if (random_upto(rs,100) < (unsigned long)params->expansion) {
+        if (random_upto(dd->rs,100) < (unsigned long)dd->params->expansion) {
             newx = maxx; newy = maxy;
             debug(("Creating new island at (%d,%d) (expanded).\n", newx, newy));
         } else {
-            newx = minx + random_upto(rs,diffx+1)*dx;
-            newy = miny + random_upto(rs,diffy+1)*dy;
+            newx = minx + random_upto(dd->rs,diffx+1)*dx;
+            newy = miny + random_upto(dd->rs,diffy+1)*dy;
             debug(("Creating new island at (%d,%d).\n", newx, newy));
         }
         /* check we're not next to island in the other orthogonal direction. */
@@ -1948,7 +1959,7 @@ foundmax:
 
         ni_curr++; ni_bad = 0;
 join:
-        island_join(is, is2, random_upto(rs, tobuild->maxb)+1, false);
+        island_join(is, is2, random_upto(dd->rs, tobuild->maxb)+1, false);
         debug_state(tobuild);
         continue;
 
@@ -1965,56 +1976,87 @@ bad:
     }
 
 generated:
+    bool solved = true, can_solve = true;
     if (ni_curr == 1) {
         debug(("Only generated one island (!), retrying.\n"));
-        goto generate;
+        solved = false;
     }
     /* Check we have at least one island on each extremity of the grid. */
     echeck = 0;
-    for (x = 0; x < params->w; x++) {
+    for (x = 0; x < dd->params->w; x++) {
         if (INDEX(tobuild, gridi, x, 0))           echeck |= 1;
-        if (INDEX(tobuild, gridi, x, params->h-1)) echeck |= 2;
+        if (INDEX(tobuild, gridi, x, dd->params->h-1)) echeck |= 2;
     }
-    for (y = 0; y < params->h; y++) {
+    for (y = 0; y < dd->params->h; y++) {
         if (INDEX(tobuild, gridi, 0,           y)) echeck |= 4;
-        if (INDEX(tobuild, gridi, params->w-1, y)) echeck |= 8;
+        if (INDEX(tobuild, gridi, dd->params->w-1, y)) echeck |= 8;
     }
     if (echeck != 15) {
         debug(("Generated grid doesn't fill to sides, retrying.\n"));
-        goto generate;
+        solved = false;
     }
 
     map_count(tobuild);
     map_find_orthogonal(tobuild);
 
-    if (params->difficulty > 0) {
+    if (dd->params->difficulty > 0) {
         if ((ni_curr > MIN_SENSIBLE_ISLANDS) &&
-            (solve_from_scratch(tobuild, params->difficulty-1) > 0)) {
+            (solve_from_scratch(tobuild, dd->params->difficulty-1) > 0)) {
             debug(("Grid is solvable at difficulty %d (too easy); retrying.\n",
-                   params->difficulty-1));
-            goto generate;
+                   dd->params->difficulty-1));
+            solved = false;
         }
     }
 
-    if (solve_from_scratch(tobuild, params->difficulty) == 0) {
+    if (solve_from_scratch(tobuild, dd->params->difficulty) == 0) {
         debug(("Grid not solvable at difficulty %d, (too hard); retrying.\n",
                params->difficulty));
-        goto generate;
+        solved = false;
+        can_solve = false;
     }
 
     /* ... tobuild is now solved. We rely on this making the diff for aux. */
     debug_state(tobuild);
-    ret = encode_game(tobuild);
-    {
+    encode_game(tobuild, dd->desc);
+    if (can_solve) {
         game_state *clean = dup_game(tobuild);
         map_clear(clean);
         map_update_possibles(clean);
-        *aux = game_state_diff(clean, tobuild);
+        dd->aux = game_state_diff(clean, tobuild);
         free_game(clean);
+    } else {
+        sfree(dd->aux);
+        dd->aux = NULL;
     }
     free_game(tobuild);
 
-    return ret;
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    if (!keep_outputs) {
+        sfree(dd->desc);
+        sfree(dd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+			   char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -3344,6 +3386,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON,		       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 /* vim: set shiftwidth=4 tabstop=8: */
