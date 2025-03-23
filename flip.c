@@ -356,22 +356,49 @@ static void addneighbours(tree234 *t, int w, int h, int cx, int cy,
     addsq(t, w, h, cx, cy, x, y+1, matrix);
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    unsigned char *matrix;
+    unsigned char *grid;
+    bool inventing_lights;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
-    int w = params->w, h = params->h, wh = w * h;
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->matrix = snewn(wh * wh, unsigned char);
+    gdd->grid = snewn(wh, unsigned char);
+    gdd->inventing_lights = false;
+
+    dd->desc = gdd->desc = NULL;
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    int w = gdd->params->w, h = gdd->params->h, wh = w * h;
     int i, j;
     unsigned char *matrix, *grid;
-    char *mbmp, *gbmp, *ret;
+    char *mbmp, *gbmp;
 
-    matrix = snewn(wh * wh, unsigned char);
-    grid = snewn(wh, unsigned char);
+    matrix = gdd->matrix;
+    grid = gdd->grid;
 
+    bool solved = true;
     /*
      * First set up the matrix.
      */
-    switch (params->matrix_type) {
+    switch (gdd->params->matrix_type) {
       case CROSSES:
+        if (gdd->inventing_lights) break;
         for (i = 0; i < wh; i++) {
             int ix = i % w, iy = i / w;
             for (j = 0; j < wh; j++) {
@@ -384,7 +411,8 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         }
         break;
       case RANDOM:
-        while (1) {
+        if (gdd->inventing_lights) break;
+        {
             tree234 *pick, *cov, *osize;
             int limit;
 
@@ -435,7 +463,7 @@ static char *new_game_desc(const game_params *params, random_state *rs,
                  * Pick at random from all elements up to k of the
                  * pick tree.
                  */
-                k = random_upto(rs, k+1);
+                k = random_upto(gdd->rs, k+1);
                 sq = delpos234(pick, k);
                 del234(cov, sq);
                 del234(osize, sq);
@@ -533,8 +561,7 @@ static char *new_game_desc(const game_params *params, random_state *rs,
                 if (j < wh)
                     break;
             }
-            if (i == wh)
-                break;                 /* no matches found */
+            solved = i == wh;
         }
         break;
     }
@@ -570,10 +597,10 @@ static char *new_game_desc(const game_params *params, random_state *rs,
      * way, and we thereby guarantee to choose equiprobably from
      * all the output points. Phew!
      */
-    while (1) {
+    {
         memset(grid, 0, wh);
         for (i = 0; i < wh; i++) {
-            int v = random_upto(rs, 2);
+            int v = random_upto(gdd->rs, 2);
             if (v) {
                 for (j = 0; j < wh; j++)
                     grid[j] ^= matrix[i*wh+j];
@@ -585,8 +612,10 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         for (i = 0; i < wh; i++)
             if (grid[i])
                 break;
-        if (i < wh)
-            break;
+        gdd->inventing_lights = i == wh;
+    }
+    if (gdd->inventing_lights) {
+        solved = false;
     }
 
     /*
@@ -596,13 +625,40 @@ static char *new_game_desc(const game_params *params, random_state *rs,
      */
     mbmp = encode_bitmap(matrix, wh*wh);
     gbmp = encode_bitmap(grid, wh);
-    ret = snewn(strlen(mbmp) + strlen(gbmp) + 2, char);
-    sprintf(ret, "%s,%s", mbmp, gbmp);
+    sfree(gdd->desc);
+    dd->desc = gdd->desc = snewn(strlen(mbmp) + strlen(gbmp) + 2, char);
+    sprintf(gdd->desc, "%s,%s", mbmp, gbmp);
     sfree(mbmp);
     sfree(gbmp);
-    sfree(matrix);
-    sfree(grid);
-    return ret;
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->matrix);
+    sfree(gdd->grid);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+               char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -691,6 +747,29 @@ static char *solve_game(const game_state *state, const game_state *currstate,
     int i, j, k, len, bestlen;
     char *ret;
 
+    // TODO: We check if we have an unslovable game, so that we don't spend a huge amount of time trying to solve it.
+    //  Ideally we'd have a better way to signal this, and whether a game is amenable to solving partial states.
+    {
+        for (i = 0; i < wh; i++) {
+            for (j = 0; j < wh; j++)
+                if (i != j &&
+                    !memcmp(currstate->matrix->matrix + i * wh, currstate->matrix->matrix + j * wh, wh))
+                    break;
+            if (j < wh)
+                break;
+        }
+        if (i != wh) {
+            *error = "Will not try to solve unfinished puzzle";
+            return NULL;
+        }
+        for (i = 0; i < wh; i++)
+            if (currstate->grid[i])
+                break;
+        if (i == wh) {
+            *error = "Will not try to solve unfinished puzzle";
+            return NULL;
+        }
+    }
     /*
      * Set up a list of simultaneous equations. Each one is of
      * length (wh+1) and has wh coefficients followed by a value.
@@ -1347,4 +1426,7 @@ const struct game thegame = {
     true,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+	initialise_desc_data,
+	attempt_new_desc,
+	destroy_desc_data
 };
