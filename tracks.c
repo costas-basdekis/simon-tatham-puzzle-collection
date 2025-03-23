@@ -721,12 +721,35 @@ done:
     return ret;
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-                           char **aux, bool interactive)
-{
-    int i, j, w = params->w, h = params->h, x, y, ret;
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
     game_state *state;
-    char *desc, *p;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->state = blank_game(gdd->params);
+
+    dd->desc = gdd->desc = snewn(w * h * 3 + (w + h) * 5, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
+    int i, j, w = params->w, h = params->h, x, y, ret;
+    game_state *state = gdd->state;
+    char *desc = gdd->desc, *p;
     game_params adjusted_params;
 
     /*
@@ -738,11 +761,9 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         params = &adjusted_params;
     }
 
-    state = blank_game(params);
-
     /* --- lay the random path */
 
-newpath:
+    bool solved = true;
     lay_path(state, rs);
     for (x = 0; x < w; x++) {
         for (y = 0; y < h; y++) {
@@ -766,28 +787,31 @@ newpath:
         }
     }
     for (i = 0; i < w+h; i++) {
-        if (state->numbers->numbers[i] == 0)
-            goto newpath; /* too boring */
+        if (state->numbers->numbers[i] == 0) {
+            solved = false; /* too boring */
+            break;
+        }
     }
 
-    if (params->single_ones) {
+    if (solved && params->single_ones) {
         bool last_was_one = true, is_one; /* disallow 1 clue at entry point */
         for (i = 0; i < w+h; i++) {
             is_one = (state->numbers->numbers[i] == 1);
-            if (is_one && last_was_one)
-                goto newpath; /* disallow consecutive 1 clues. */
+            if (is_one && last_was_one) {
+                solved = false; /* disallow consecutive 1 clues. */
+                break;
+            }
             last_was_one = is_one;
         }
         if (state->numbers->numbers[w+h-1] == 1)
-            goto newpath; /* (disallow 1 clue at exit point) */
+            solved = false; /* (disallow 1 clue at exit point) */
     }
 
     /* --- Add clues to make a soluble puzzle */
     ret = add_clues(state, rs, params->diff);
-    if (ret != 1) goto newpath; /* couldn't make it soluble, or too easy */
+    if (ret != 1) solved = false; /* couldn't make it soluble, or too easy */
 
     /* --- Generate the game desc based on the generated grid. */
-    desc = snewn(w*h*3 + (w+h)*5, char);
     for (i = j = 0; i < w*h; i++) {
         if (!(state->sflags[i] & S_CLUE) && j > 0 &&
                 desc[j-1] >= 'a' && desc[j-1] < 'z')
@@ -813,10 +837,37 @@ newpath:
 
     ret = tracks_solve(state, DIFFCOUNT, NULL);
     assert(ret >= 0);
-    free_game(state);
 
     debug(("new_game_desc: %s", desc));
-    return desc;
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    free_game(gdd->state);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -1843,6 +1894,10 @@ static void set_flash_data(game_state *state)
 
     for (x = 0; x < w; x++)
         ntrack += state->numbers->numbers[x];
+    if (ntrack == 1) {
+        // We can't set the flags properly with a single track
+        return;
+    }
     n = 0; x = 0; y = state->numbers->row_s; d = R;
     do {
         state->sflags[y*w + x] &= ~(S_FLASH_MASK << S_FLASH_SHIFT);
@@ -3070,6 +3125,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER
