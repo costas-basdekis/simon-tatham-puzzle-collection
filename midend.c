@@ -826,7 +826,7 @@ void midend_create_game_inner(midend *me, new_game_desc_args *args, bool make_co
             sfree(me->aux_info);
             me->aux_info = args->aux;
         }
-        if (make_copies) {
+        if (make_copies && me->aux_info) {
             me->aux_info = dupstr(me->aux_info);
         }
     }
