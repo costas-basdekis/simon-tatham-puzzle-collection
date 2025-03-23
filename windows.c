@@ -1449,17 +1449,21 @@ static bool savefile_read(void *wctx, void *buf, int len)
     return (ret == len);
 }
 
-static int CALLBACK StopNewGameDlgProc(HWND hwnd, UINT msg,
-                 WPARAM wParam, LPARAM lParam)
+static int CALLBACK StopNewGameDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     frontend *fe = (frontend *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
 
     switch (msg) {
-      case WM_INITDIALOG:
-        return 1;
-      case WM_CLOSE:
-        fe->stop_new_game_dialog_done = true;
-        return 0;
+        case WM_INITDIALOG:
+            return 1;
+        case WM_COMMAND:
+            if (LOWORD(wParam) == IDOK) {
+                fe->stop_new_game_dialog_done = true;
+            }
+            break;
+        case WM_CLOSE:
+            fe->stop_new_game_dialog_done = true;
+            break;
     }
 
     return 0;
@@ -1552,6 +1556,12 @@ static void make_stop_new_game_window(get_new_game_desc_args *thread_args)
              WS_CHILD | WS_VISIBLE, 10, 20, winwidth - 20, 30,
              fe->stop_new_game_window, (HMENU)1000, fe->inst, NULL);
     SendMessage(fe->stop_new_game_label, WM_SETFONT, (WPARAM)fe->cfgfont, MAKELPARAM(true, 0));
+
+    HWND button = CreateWindowEx(0, "BUTTON", "Stop",
+BS_PUSHBUTTON | WS_TABSTOP | BS_DEFPUSHBUTTON | WS_CHILD | WS_VISIBLE,
+        10, 60, winwidth - 20, 30,
+        fe->stop_new_game_window, (HMENU)IDOK, fe->inst, NULL);
+    SendMessage(button, WM_SETFONT, (WPARAM)fe->cfgfont, MAKELPARAM(true, 0));
 
     SendMessage(fe->stop_new_game_window, WM_INITDIALOG, 0, 0);
 
