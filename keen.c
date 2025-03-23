@@ -893,17 +893,54 @@ static const char *parse_block_structure(const char **p, int w, DSF *dsf)
     return NULL;
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
-{
-    int w = params->w, a = w*w;
-    digit *grid, *soln;
-    int *order, *revorder, *singletons;
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    int *order;
+    int *revorder;
+    int *singletons;
     DSF *dsf;
-    long *clues, *cluevals;
+    long *clues;
+    long* cluevals;
+    digit *grid;
+    digit *soln;
+    char *aux;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, a = w * w;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->order = gdd->order = snewn(a, int);
+    gdd->revorder = gdd->revorder = snewn(a, int);
+    gdd->singletons = gdd->singletons = snewn(a, int);
+    gdd->dsf = gdd->dsf = dsf_new_min(a);
+    gdd->clues = gdd->clues = snewn(a, long);
+    gdd->cluevals = gdd->cluevals = snewn(a, long);
+    gdd->grid = snewn(a, digit);
+    gdd->soln = snewn(a, digit);
+    dd->aux = gdd->aux = snewn(a + 2, char);
+    dd->desc = gdd->desc = snewn(40 * a, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    int w = gdd->params->w, a = w*w;
+    digit *grid = gdd->grid, *soln = gdd->soln;
+    int *order = gdd->order, *revorder = gdd->revorder, *singletons = gdd->singletons;
+    DSF *dsf = gdd->dsf;
+    long *clues = gdd->clues, *cluevals = gdd->cluevals;
     int i, j, k, n, x, y, ret;
-    int diff = params->diff;
-    char *desc, *p;
+    int diff = gdd->params->diff;
+    char *desc = gdd->desc, *p;
 
     /*
      * Difficulty exceptions: 3x3 puzzles at difficulty Hard or
@@ -931,22 +968,12 @@ done
     if (w == 3 && diff > DIFF_NORMAL)
 	diff = DIFF_NORMAL;
 
-    grid = NULL;
-
-    order = snewn(a, int);
-    revorder = snewn(a, int);
-    singletons = snewn(a, int);
-    dsf = dsf_new_min(a);
-    clues = snewn(a, long);
-    cluevals = snewn(a, long);
-    soln = snewn(a, digit);
-
-    while (1) {
+    bool solved = true;
+    {
 	/*
 	 * First construct a latin square to be the solution.
 	 */
-	sfree(grid);
-	grid = latin_generate(w, rs);
+	latin_generate_reuse(w, rs, grid);
 
 	/*
 	 * Divide the grid into arbitrarily sized blocks, but so as
@@ -1035,7 +1062,7 @@ done
 	    if (singletons[i])
                 break;
         if (i < a)
-            continue;
+            solved = false;
 
 	/*
 	 * Decide what would be acceptable clues for each block.
@@ -1065,7 +1092,7 @@ done
 	    singletons[i] = 0;
 	    j = dsf_minimal(dsf, i);
 	    k = dsf_size(dsf, j);
-	    if (params->multiplication_only)
+	    if (gdd->params->multiplication_only)
 		singletons[j] = F_MUL;
 	    else if (j == i && k > 2) {
 		singletons[j] |= F_ADD | F_MUL;
@@ -1228,12 +1255,12 @@ done
 	    memset(soln, 0, a);
 	    ret = solver(w, dsf, clues, soln, diff-1);
 	    if (ret <= diff-1)
-		continue;
+		solved = false;
 	}
 	memset(soln, 0, a);
 	ret = solver(w, dsf, clues, soln, diff);
 	if (ret != diff)
-	    continue;		       /* go round again */
+	    solved = false;		       /* go round again */
 
 	/*
 	 * I wondered if at this point it would be worth trying to
@@ -1249,13 +1276,11 @@ done
 	/*
 	 * We've got a usable puzzle!
 	 */
-	break;
     }
 
     /*
      * Encode the puzzle description.
      */
-    desc = snewn(40*a, char);
     p = desc;
     p = encode_block_structure(p, w, dsf);
     *p++ = ',';
@@ -1272,30 +1297,56 @@ done
 	}
     }
     *p++ = '\0';
-    desc = sresize(desc, p - desc, char);
 
     /*
      * Encode the solution.
      */
-    assert(memcmp(soln, grid, a) == 0);
-    *aux = snewn(a+2, char);
-    (*aux)[0] = 'S';
+    if (solved) {
+        assert(memcmp(soln, grid, a) == 0);
+    }
+    gdd->aux[0] = 'S';
     for (i = 0; i < a; i++)
-	(*aux)[i+1] = '0' + soln[i];
-    (*aux)[a+1] = '\0';
+	gdd->aux[i+1] = '0' + soln[i];
+    gdd->aux[a+1] = '\0';
 
-    sfree(grid);
-    sfree(order);
-    sfree(revorder);
-    sfree(singletons);
-    dsf_free(dsf);
-    sfree(clues);
-    sfree(cluevals);
-    sfree(soln);
-
-    return desc;
+    return true;
 }
 
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->order);
+    sfree(gdd->revorder);
+    sfree(gdd->singletons);
+    dsf_free(gdd->dsf);
+    sfree(gdd->clues);
+    sfree(gdd->cluevals);
+    sfree(gdd->grid);
+    sfree(gdd->soln);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+			   char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
+}
 /* ----------------------------------------------------------------------
  * Gameplay.
  */
@@ -1859,10 +1910,6 @@ static game_state *execute_move(const game_state *from, const char *move)
 	ret->completed = ret->cheated = true;
 
 	for (i = 0; i < a; i++) {
-	    if (move[i+1] < '1' || move[i+1] > '0'+w) {
-		free_game(ret);
-		return NULL;
-	    }
 	    ret->grid[i] = move[i+1] - '0';
 	    ret->pencil[i] = 0;
 	}
@@ -2552,6 +2599,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON | REQUIRE_NUMPAD,  /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER

@@ -1137,7 +1137,12 @@ void latin_debug(digit *sq, int o)
 
 digit *latin_generate(int o, random_state *rs)
 {
-    digit *sq;
+    return latin_generate_reuse(o, rs, NULL);
+}
+
+digit *latin_generate_reuse(int o, random_state *rs, digit *existing_sq)
+{
+    digit *sq = existing_sq;
     int *adjdata, *adjsizes, *matching;
     int **adjlists;
     void *scratch;
@@ -1158,7 +1163,9 @@ digit *latin_generate(int o, random_state *rs)
      * support functions in matching.c.
      */
 
-    sq = snewn(o*o, digit);
+    if (!sq) {
+        sq = snewn(o*o, digit);
+    }
 
     /*
      * matching.c will take care of randomising the generation of each
