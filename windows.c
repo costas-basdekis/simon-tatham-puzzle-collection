@@ -196,6 +196,7 @@ struct frontend {
     HWND stop_new_game_window;
     HWND stop_new_game_label;
     bool stop_new_game_dialog_done;
+    void *current_thread_args;
 };
 
 void frontend_free(frontend *fe)
@@ -1428,6 +1429,7 @@ static frontend *frontend_new(HINSTANCE inst)
     fe->stop_new_game_window = NULL;
     fe->stop_new_game_label = NULL;
     fe->stop_new_game_dialog_done = false;
+    fe->current_thread_args = NULL;
 
     return fe;
 }
@@ -1463,8 +1465,19 @@ static int CALLBACK StopNewGameDlgProc(HWND hwnd, UINT msg,
     return 0;
 }
 
-static void make_stop_new_game_window(frontend *fe)
+typedef struct get_new_game_desc_args {
+    midend *me;
+    frontend *fe;
+    new_game_desc_args *args;
+    int attempts;
+    bool solved;
+} get_new_game_desc_args;
+
+DWORD WINAPI get_new_game_desc_thread(void *arg);
+
+static void make_stop_new_game_window(get_new_game_desc_args *thread_args)
 {
+    frontend *fe = thread_args->fe;
     WNDCLASS wc;
     HDC hdc;
     int winwidth, winheight;
@@ -1544,6 +1557,9 @@ static void make_stop_new_game_window(frontend *fe)
 
     EnableWindow(fe->hwnd, false);
     ShowWindow(fe->stop_new_game_window, SW_SHOWNORMAL);
+    EnableMenuItem(fe->gamemenu, IDM_NEW, MF_DISABLED);
+
+    CreateThread(NULL, 0, get_new_game_desc_thread, thread_args, 0, NULL);
 
     MSG msg;
     int gm;
@@ -1552,51 +1568,41 @@ static void make_stop_new_game_window(frontend *fe)
             DispatchMessage(&msg);
         }
         if (fe->stop_new_game_dialog_done) {
-            fe->stop_new_game_dialog_done = false;
             break;
         }
     }
     EnableWindow(fe->hwnd, true);
     SetForegroundWindow(fe->hwnd);
     DestroyWindow(fe->stop_new_game_window);
+    fe->stop_new_game_window = NULL;
+    fe->stop_new_game_label = NULL;
+    fe->stop_new_game_dialog_done = false;
+    fe->current_thread_args = NULL;
     DeleteObject(fe->cfgfont);
+    EnableMenuItem(fe->gamemenu, IDM_NEW, MF_ENABLED);
 }
 
-DWORD WINAPI control_new_game(void *arg)
+DWORD WINAPI control_new_game(get_new_game_desc_args *thread_args)
 {
-    frontend *fe = arg;
-    make_stop_new_game_window(fe);
+    make_stop_new_game_window(thread_args);
     return 0;
 }
 
-typedef struct get_new_game_desc_args {
-    midend *me;
-    frontend *fe;
-    new_game_desc_args *args;
-    int attempts;
-    bool solved;
-} get_new_game_desc_args;
-
-void new_game_started(drawing *dr)
-{
-    frontend *fe = GET_HANDLE_AS_TYPE(dr, frontend);
-    EnableMenuItem(fe->gamemenu, IDM_NEW, MF_DISABLED);
-    fe->stop_new_game_dialog_done = false;
-    CreateThread(NULL, 0, control_new_game, fe, 0, NULL);
-}
-
-void new_game_attempt(void *arg, midend *me, new_game_desc_args *args, int attempts, bool solved)
+bool new_game_attempt(void *arg, midend *me, new_game_desc_args *args, int attempts, bool solved)
 {
 	get_new_game_desc_args *thread_args = arg;
+	if (thread_args->fe->current_thread_args != thread_args) {
+		return false;
+	}
 	thread_args->attempts = attempts;
 	thread_args->solved = solved;
 	SendMessage(thread_args->fe->hwnd, WM_NEW_GAME_ATTEMPT, (WPARAM)thread_args, (LPARAM)NULL);
+	return true;
 }
 
 void new_game_finished(drawing *dr)
 {
     frontend *fe = GET_HANDLE_AS_TYPE(dr, frontend);
-    EnableMenuItem(fe->gamemenu, IDM_NEW, MF_ENABLED);
     fe->stop_new_game_dialog_done = true;
     if (fe->stop_new_game_window) {
         SendMessage(fe->stop_new_game_window, WM_CLOSE, 0, 0);
@@ -1621,7 +1627,8 @@ void get_new_game_desc_async(midend *me, frontend *fe, new_game_desc_args *args)
     thread_args->args = args;
     thread_args->attempts = 0;
     thread_args->solved = false;
-    CreateThread(NULL, 0, get_new_game_desc_thread, thread_args, 0, NULL);
+    fe->current_thread_args = thread_args;
+    CreateThread(NULL, 0, control_new_game, thread_args, 0, NULL);
 }
 
 /*

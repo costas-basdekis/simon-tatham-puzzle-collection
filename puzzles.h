@@ -255,11 +255,10 @@ void frontend_default_colour(frontend *fe, float *output);
 void deactivate_timer(frontend *fe);
 void activate_timer(frontend *fe);
 void get_random_seed(void **randseed, int *randseedsize);
-void new_game_started(drawing *dr);
 void new_game_finished(drawing *dr);
 typedef struct new_game_desc_args new_game_desc_args;
 void get_new_game_desc_async(midend *me, frontend *fe, new_game_desc_args *args);
-void new_game_attempt(void *arg, midend *me, new_game_desc_args *args, int attempts, bool solved);
+bool new_game_attempt(void *arg, midend *me, new_game_desc_args *args, int attempts, bool solved);
 
 /*
  * drawing.c

@@ -567,7 +567,7 @@ char *get_new_seedstr(midend *me, char *seedstr)
 }
 
 void midend_create_game(midend *me);
-void midend_create_game_inner(midend *me, new_game_desc_args *args);
+void midend_create_game_inner(midend *me, new_game_desc_args *args, bool make_copies);
 
 typedef struct new_game_desc_args {
     int game_id;
@@ -581,14 +581,17 @@ typedef struct new_game_desc_args {
 
 void new_game_async_attempt(midend *me, new_game_desc_args *args)
 {
-    midend_create_game_inner(me, args);
+    midend_create_game_inner(me, args, true);
     midend_solve(me);
     midend_redraw(me);
 }
 
 void new_game_async_complete(midend *me, new_game_desc_args *args)
 {
-    midend_create_game_inner(me, args);
+    if (!args->desc) {
+        return;
+    }
+    midend_create_game_inner(me, args, false);
     midend_redraw(me);
     new_game_finished(me->drawing);
 }
@@ -596,7 +599,6 @@ void new_game_async_complete(midend *me, new_game_desc_args *args)
 void midend_new_game(midend *me)
 {
     if (me->nstates > 0 && (me->genmode == GOT_NOTHING || me->genmode == GOT_SEED)) {
-        new_game_started(me->drawing);
         new_game_desc_args *args = snew(new_game_desc_args);
         args->game_id = get_game_id(me);
         args->genmode = me->genmode;
@@ -711,18 +713,28 @@ char *get_new_game_desc(midend *me, new_game_desc_args *args, bool iterative, vo
             args->desc = dd.desc;
             args->aux = dd.aux;
             if (iterative) {
-                new_game_attempt(iterative_arg, me, args, attempts, solved);
+                bool continue_iterating = new_game_attempt(iterative_arg, me, args, attempts, solved);
+                if (!continue_iterating) {
+                    break;
+                }
             }
         }
-        me->ourgame->destroy_desc_data(&dd, true);
+        me->ourgame->destroy_desc_data(&dd, solved);
 
-        args->aux = dd.aux;
-        args->desc = dd.desc;
+        if (solved) {
+            args->aux = dd.aux;
+            args->desc = dd.desc;
+        } else {
+            args->aux = NULL;
+            args->desc = NULL;
+        }
     } else {
         args->desc = me->ourgame->new_desc(args->params, rs, &args->aux, args->interactive);
     }
 
-    assert_printable_ascii(args->desc);
+    if (args->desc) {
+        assert_printable_ascii(args->desc);
+    }
     random_free(rs);
 
     return args->desc;
@@ -746,10 +758,10 @@ void midend_create_game(midend *me)
         }
         args.desc = get_new_game_desc(me, &args, false, NULL);
     }
-    midend_create_game_inner(me, &args);
+    midend_create_game_inner(me, &args, false);
 }
 
-void midend_create_game_inner(midend *me, new_game_desc_args *args)
+void midend_create_game_inner(midend *me, new_game_desc_args *args, bool make_copies)
 {
     me->newgame_undo.len = 0;
     if (me->newgame_can_store_undo) {
@@ -787,11 +799,17 @@ void midend_create_game_inner(midend *me, new_game_desc_args *args)
                 sfree(me->seedstr);
                 me->seedstr = args->seedstr;
             }
+            if (make_copies) {
+                me->seedstr = dupstr(me->seedstr);
+            }
             if (me->curparams != args->params) {
                 if (me->curparams) {
                     me->ourgame->free_params(me->curparams);
                 }
                 me->curparams = args->params;
+            }
+            if (make_copies) {
+                me->curparams = me->ourgame->dup_params(me->curparams);
             }
         }
 
@@ -801,9 +819,15 @@ void midend_create_game_inner(midend *me, new_game_desc_args *args)
             sfree(me->privdesc);
             me->privdesc = NULL;
         }
+        if (make_copies) {
+            me->desc = dupstr(me->desc);
+        }
         if (me->aux_info != args->aux) {
             sfree(me->aux_info);
             me->aux_info = args->aux;
+        }
+        if (make_copies) {
+            me->aux_info = dupstr(me->aux_info);
         }
     }
 
