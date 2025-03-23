@@ -749,7 +749,7 @@ void midend_create_game(midend *me)
         me->seedstr ? dupstr(me->seedstr) : NULL,
         NULL,
         me->drawing != NULL,
-        NULL
+        me->genmode == GOT_DESC ? me->desc : NULL,
     };
     if (me->genmode != GOT_DESC) {
         if (me->genmode == GOT_NOTHING) {
