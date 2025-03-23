@@ -1239,13 +1239,18 @@ digit *latin_generate_reuse(int o, random_state *rs, digit *existing_sq)
     return sq;
 }
 
-digit *latin_generate_rect(int w, int h, random_state *rs)
+digit *latin_generate_rect_reuse(int w, int h, random_state *rs, digit *existing_rect, digit *existing_latin)
 {
+    if (w == h) {
+        return latin_generate_reuse(w, rs, existing_rect);
+    }
     int o = max(w, h), x, y;
     digit *latin, *latin_rect;
 
-    latin = latin_generate(o, rs);
-    latin_rect = snewn(w*h, digit);
+    latin = latin_generate_reuse(o, rs, existing_latin);
+    if (!latin_rect) {
+        latin_rect = snewn(w*h, digit);
+    }
 
     for (x = 0; x < w; x++) {
         for (y = 0; y < h; y++) {
@@ -1253,8 +1258,15 @@ digit *latin_generate_rect(int w, int h, random_state *rs)
         }
     }
 
-    sfree(latin);
+    if (!existing_latin) {
+        sfree(latin);
+    }
     return latin_rect;
+}
+
+digit *latin_generate_rect(int w, int h, random_state *rs)
+{
+    return latin_generate_rect_reuse(w, h, rs, NULL, NULL);
 }
 
 /* --------------------------------------------------------

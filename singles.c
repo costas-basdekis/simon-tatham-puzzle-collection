@@ -370,9 +370,12 @@ done:
     }
 }
 
-static char *generate_desc(game_state *state, bool issolve)
+static char *generate_desc(game_state *state, bool issolve, char *existing)
 {
-    char *ret = snewn(state->n+1+(issolve?1:0), char);
+    char *ret = existing;
+    if (!ret) {
+        ret = snewn(state->n+1+(issolve?1:0), char);
+    }
     int i, p=0;
 
     if (issolve)
@@ -1313,29 +1316,72 @@ found:
     return j;
 }
 
-static char *new_game_desc(const game_params *params_orig, random_state *rs,
-			   char **aux, bool interactive)
-{
-    game_params *params = dup_params(params_orig);
-    game_state *state = blank_game(params->w, params->h);
-    game_state *tosolve = blank_game(params->w, params->h);
-    int i, j, *scratch, *rownums, *colnums, x, y, ntries;
-    int w = state->w, h = state->h, o = state->o;
-    char *ret;
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    game_params *actual_params;
+    game_state *state;
+    game_state *tosolve;
+    struct solver_state *ss;
+    int *scratch;
+    int *rownums;
+    int *colnums;
+    digit *latin_square;
     digit *latin;
-    struct solver_state *ss = solver_state_new(state);
+    bool generated;
+    bool randomised;
+    int ntries;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, o = max(w, h);
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->actual_params = dup_params(gdd->params);
+    gdd->state = blank_game(gdd->actual_params->w, gdd->actual_params->h);
+    gdd->tosolve = blank_game(gdd->actual_params->w, gdd->actual_params->h);
+    gdd->ss = solver_state_new(gdd->state);
+    gdd->scratch = snewn(gdd->state->n, int);
+    gdd->rownums = snewn(h * o, int);
+    gdd->colnums = snewn(w * o, int);
+    gdd->latin_square = latin_generate(o, gdd->rs);
+    gdd->latin = latin_generate_rect_reuse(w, h, gdd->rs, NULL, gdd->latin_square);
+    gdd->generated = false;
+    gdd->randomised = false;
+    gdd->ntries = 0;
+
+    dd->desc = gdd->desc = snewn(gdd->state-> n + 1 + 1, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    game_params *actual_params = gdd->actual_params;
+    game_state *state = gdd->state;
+    game_state *tosolve = gdd->tosolve;
+    int i, j, *scratch = gdd->scratch, *rownums = gdd->rownums, *colnums = gdd->colnums, x, y;
+    int w = state->w, h = state->h, o = state->o;
+    digit *latin = gdd->latin;
+    struct solver_state *ss = gdd->ss;
 
     /* Downgrade difficulty to Easy for puzzles so tiny that they aren't
      * possible to generate at Tricky. These are 2x2, 2x3 and 3x3, i.e.
      * any puzzle that doesn't have one dimension at least 4. */
-    if ((w < 4 || h < 4) && params->diff > DIFF_EASY)
-        params->diff = DIFF_EASY;
+    if ((w < 4 || h < 4) && actual_params->diff > DIFF_EASY)
+        actual_params->diff = DIFF_EASY;
 
-    scratch = snewn(state->n, int);
-    rownums = snewn(h*o, int);
-    colnums = snewn(w*o, int);
+    if (gdd->generated && gdd->randomised) {
+        gdd->generated = gdd->randomised = false;
+    }
 
-generate:
+    if (!gdd->generated) {
     ss->n_ops = 0;
     debug(("Starting game generation, size %dx%d\n", w, h));
 
@@ -1343,10 +1389,9 @@ generate:
 
     /* First, generate the latin rectangle.
      * The order of this, o, is max(w,h). */
-    latin = latin_generate_rect(w, h, rs);
+    latin = latin_generate_rect_reuse(w, h, rs, latin, gdd->latin_square);
     for (i = 0; i < state->n; i++)
         state->nums[i] = (int)latin[i];
-    sfree(latin);
     debug_state("State after latin square", state);
 
     /* Add black squares at random, using bits of solver as we go (to lay
@@ -1375,7 +1420,8 @@ generate:
 
         if (state->impossible) {
             debug(("generator made impossible, restarting...\n"));
-            goto generate;
+        } else {
+            gdd->generated = true;
         }
     }
     debug_state("State after adding blacks", state);
@@ -1399,9 +1445,10 @@ generate:
         rownums[y * o + j-1] += 1;
         colnums[x * o + j-1] += 1;
     }
+    gdd->ntries = 0;
+    }
 
-    ntries = 0;
-randomise:
+    if (!gdd->randomised) {
     for (i = 0; i < state->n; i++) {
         if (!(state->flags[i] & F_BLACK)) continue;
         state->nums[i] = best_black_col(state, rs, scratch, i, rownums, colnums);
@@ -1409,28 +1456,58 @@ randomise:
     debug_state("State after adding numbers", state);
 
     /* DIFF_ANY just returns whatever we first generated, for testing purposes. */
-    if (params->diff != DIFF_ANY &&
-        !new_game_is_good(params, state, tosolve)) {
-        ntries++;
-        if (ntries > MAXTRIES) {
+    if (actual_params->diff != DIFF_ANY &&
+        !new_game_is_good(actual_params, state, tosolve)) {
+        gdd->ntries++;
+        if (gdd->ntries > MAXTRIES) {
             debug(("Ran out of randomisation attempts, re-generating.\n"));
-            goto generate;
+            gdd->generated = gdd->randomised = false;
         }
         debug(("Re-randomising numbers under black squares.\n"));
-        goto randomise;
+    } else {
+        gdd->randomised = true;
+    }
     }
 
-    ret = generate_desc(state, false);
+    generate_desc(state, false, gdd->desc);
 
-    free_game(tosolve);
-    free_game(state);
-    free_params(params);
-    solver_state_free(ss);
-    sfree(scratch);
-    sfree(rownums);
-    sfree(colnums);
+    return gdd->generated && gdd->randomised;
+}
 
-    return ret;
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    free_params(gdd->actual_params);
+    free_game(gdd->state);
+    free_game(gdd->tosolve);
+    solver_state_free(gdd->ss);
+    sfree(gdd->scratch);
+    sfree(gdd->rownums);
+    sfree(gdd->colnums);
+    sfree(gdd->latin_square);
+    sfree(gdd->latin);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -1909,6 +1986,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON,		       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER
