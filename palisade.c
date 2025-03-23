@@ -751,6 +751,8 @@ static void destroy_desc_data(desc_data *dd, bool keep_outputs)
     if (!keep_outputs) {
         sfree(gdd->desc);
         sfree(gdd->soln);
+        dd->desc = NULL;
+        dd->aux = NULL;
     }
     sfree(gdd);
     dd->game_desc_data = NULL;
