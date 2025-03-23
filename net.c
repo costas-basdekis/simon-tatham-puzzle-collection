@@ -1138,18 +1138,50 @@ static void perturb(int w, int h, unsigned char *tiles, bool wrapping,
     sfree(perimeter);
 }
 
-static int *compute_loops_inner(int w, int h, bool wrapping,
+static int *compute_loops_inner_reuse(int w, int h, bool wrapping,
                                 const unsigned char *tiles,
                                 const unsigned char *barriers,
-                                bool include_unlocked_squares);
+                                bool include_unlocked_squares,
+                                int *existing_loops,
+                                struct findloopstate *existing_fls);
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    unsigned char *tiles, *barriers;
+    int *loops;
+    struct findloopstate *fls;
+    char *desc;
+    char *aux;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->width, h = dd->params->height, wh = w * h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->tiles = snewn(w * h, unsigned char);
+    gdd->barriers = snewn(w * h, unsigned char);
+    gdd->loops = snewn(w*h, int);
+    gdd->fls = findloop_new_state(wh);
+
+    dd->desc = gdd->desc = snewn(w * h * 3 + 1, char);
+    dd->aux = gdd->aux = snewn(wh + 1, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
     tree234 *possibilities, *barriertree;
     int w, h, x, y, cx, cy, nbarriers;
-    unsigned char *tiles, *barriers;
-    char *desc, *p;
+    unsigned char *tiles = gdd->tiles, *barriers = gdd->barriers;
+    char *desc = gdd->desc, *p;
 
     w = params->width;
     h = params->height;
@@ -1157,10 +1189,8 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     cx = w / 2;
     cy = h / 2;
 
-    tiles = snewn(w * h, unsigned char);
-    barriers = snewn(w * h, unsigned char);
 
-    begin_generation:
+    bool solved = true;
 
     memset(tiles, 0, w * h);
     memset(barriers, 0, w * h);
@@ -1376,7 +1406,7 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 	     * regenerate the entire grid.
 	     */
 	    if (prevn != -1 && prevn <= n)
-		goto begin_generation; /* (sorry) */
+		solved = false; /* (sorry) */
 
 	    prevn = n;
 	}
@@ -1409,15 +1439,12 @@ static char *new_game_desc(const game_params *params, random_state *rs,
      * Save the unshuffled grid in aux.
      */
     {
-	char *solution;
+	char *solution = gdd->aux;
         int i;
 
-	solution = snewn(w * h + 1, char);
         for (i = 0; i < w * h; i++)
             solution[i] = "0123456789abcdef"[tiles[i] & 0xF];
         solution[w*h] = '\0';
-
-	*aux = solution;
     }
 
     /*
@@ -1453,7 +1480,7 @@ static char *new_game_desc(const game_params *params, random_state *rs,
      */
     while (1) {
         int mismatches, prev_loopsquares, this_loopsquares, i;
-        int *loops;
+        int *loops = gdd->loops;
 
       shuffle:
         for (y = 0; y < h; y++) {
@@ -1470,8 +1497,8 @@ static char *new_game_desc(const game_params *params, random_state *rs,
          */
         prev_loopsquares = w*h+1;
         while (1) {
-            loops = compute_loops_inner(w, h, params->wrapping, tiles, NULL,
-                                        true);
+            compute_loops_inner_reuse(w, h, params->wrapping, tiles, NULL,
+                true, gdd->loops, gdd->fls);
             this_loopsquares = 0;
             for (i = 0; i < w*h; i++) {
                 if (loops[i]) {
@@ -1481,7 +1508,6 @@ static char *new_game_desc(const game_params *params, random_state *rs,
                     this_loopsquares++;
                 }
             }
-            sfree(loops);
             if (this_loopsquares > prev_loopsquares) {
                 /*
                  * We're increasing rather than reducing the number of
@@ -1584,7 +1610,6 @@ static char *new_game_desc(const game_params *params, random_state *rs,
      * the right of it, and `h' means a horizontal barrier below
      * it.
      */
-    desc = snewn(w * h * 3 + 1, char);
     p = desc;
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
@@ -1600,10 +1625,40 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     assert(p - desc <= w*h*3);
     *p = '\0';
 
-    sfree(tiles);
-    sfree(barriers);
+    return solved;
+}
 
-    return desc;
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->tiles);
+    sfree(gdd->barriers);
+    sfree(gdd->loops);
+    findloop_free_state(gdd->fls);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -1961,17 +2016,20 @@ static int net_neighbour(int vertex, void *vctx)
         return -1;
 }
 
-static int *compute_loops_inner(int w, int h, bool wrapping,
+static int *compute_loops_inner_reuse(int w, int h, bool wrapping,
                                 const unsigned char *tiles,
                                 const unsigned char *barriers,
-                                bool include_unlocked_squares)
+                                bool include_unlocked_squares,
+                                int *existing_loops, struct findloopstate *existing_fls)
 {
     struct net_neighbour_ctx ctx;
-    struct findloopstate *fls;
-    int *loops;
+    struct findloopstate *fls = existing_fls;
+    int *loops = existing_loops;
     int x, y, v;
 
-    fls = findloop_new_state(w*h);
+    if (!existing_fls) {
+        fls = findloop_new_state(w*h);
+    }
     ctx.w = w;
     ctx.h = h;
     ctx.tiles = tiles;
@@ -1979,7 +2037,9 @@ static int *compute_loops_inner(int w, int h, bool wrapping,
     ctx.include_unlocked_squares = include_unlocked_squares;
     findloop_run(fls, w*h, net_neighbour, &ctx);
 
-    loops = snewn(w*h, int);
+    if (!loops) {
+        loops = snewn(w*h, int);
+    }
 
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
@@ -2004,8 +2064,18 @@ static int *compute_loops_inner(int w, int h, bool wrapping,
         }
     }
 
-    findloop_free_state(fls);
+    if (!existing_fls) {
+        findloop_free_state(fls);
+    }
     return loops;
+}
+
+static int *compute_loops_inner(int w, int h, bool wrapping,
+                                const unsigned char *tiles,
+                                const unsigned char *barriers,
+                                bool include_unlocked_squares)
+{
+    return compute_loops_inner_reuse(w, h, wrapping, tiles, barriers, include_unlocked_squares, NULL, NULL);
 }
 
 static int *compute_loops(const game_state *state,
@@ -3362,4 +3432,7 @@ const struct game thegame = {
     true,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
