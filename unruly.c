@@ -357,27 +357,39 @@ static const char *validate_desc(const game_params *params, const char *desc)
     return NULL;
 }
 
-static game_state *blank_state(int w2, int h2, bool unique, bool new_common)
+static game_state *blank_state_reuse(int w2, int h2, bool unique, bool new_common, game_state *existing)
 {
-    game_state *state = snew(game_state);
+    game_state *state = existing;
+    if (!existing) {
+        state = snew(game_state);
+    }
     int s = w2 * h2;
 
     state->w2 = w2;
     state->h2 = h2;
     state->unique = unique;
-    state->grid = snewn(s, char);
+    if (!existing) {
+        state->grid = snewn(s, char);
+    }
     memset(state->grid, EMPTY, s);
 
     if (new_common) {
-	state->common = snew(unruly_common);
-	state->common->refcount = 1;
-	state->common->immutable = snewn(s, bool);
+        if (!existing) {
+            state->common = snew(unruly_common);
+            state->common->refcount = 1;
+            state->common->immutable = snewn(s, bool);
+        }
 	memset(state->common->immutable, 0, s*sizeof(bool));
     }
 
     state->completed = state->cheated = false;
 
     return state;
+}
+
+static game_state *blank_state(int w2, int h2, bool unique, bool new_common)
+{
+    return blank_state_reuse(w2, h2, unique, new_common, NULL);
 }
 
 static game_state *new_game(midend *me, const game_params *params,
@@ -413,17 +425,17 @@ static game_state *new_game(midend *me, const game_params *params,
 
         ++p;
     }
-    assert(pos == s+1);
+    // assert(pos == s+1);
 
     return state;
 }
 
-static game_state *dup_game(const game_state *state)
+static game_state *dup_game_reuse(const game_state *state, game_state *existing)
 {
     int w2 = state->w2, h2 = state->h2;
     int s = w2 * h2;
 
-    game_state *ret = blank_state(w2, h2, state->unique, false);
+    game_state *ret = blank_state_reuse(w2, h2, state->unique, false, existing);
 
     memcpy(ret->grid, state->grid, s);
     ret->common = state->common;
@@ -433,6 +445,11 @@ static game_state *dup_game(const game_state *state)
     ret->cheated = state->cheated;
 
     return ret;
+}
+
+static game_state *dup_game(const game_state *state)
+{
+    return dup_game_reuse(state, NULL);
 }
 
 static void free_game(game_state *state)
@@ -511,20 +528,27 @@ static void unruly_solver_update_remaining(const game_state *state,
         }
 }
 
-static struct unruly_scratch *unruly_new_scratch(const game_state *state)
+static struct unruly_scratch *unruly_new_scratch_reuse(const game_state *state, struct unruly_scratch *existing)
 {
     int w2 = state->w2, h2 = state->h2;
 
-    struct unruly_scratch *ret = snew(struct unruly_scratch);
-
-    ret->ones_rows = snewn(h2, int);
-    ret->ones_cols = snewn(w2, int);
-    ret->zeros_rows = snewn(h2, int);
-    ret->zeros_cols = snewn(w2, int);
+    struct unruly_scratch *ret = existing;
+    if (!existing) {
+        ret = snew(struct unruly_scratch);
+        ret->ones_rows = snewn(h2, int);
+        ret->ones_cols = snewn(w2, int);
+        ret->zeros_rows = snewn(h2, int);
+        ret->zeros_cols = snewn(w2, int);
+    }
 
     unruly_solver_update_remaining(state, ret);
 
     return ret;
+}
+
+static struct unruly_scratch *unruly_new_scratch(const game_state *state)
+{
+    return unruly_new_scratch_reuse(state, NULL);
 }
 
 static void unruly_free_scratch(struct unruly_scratch *scratch)
@@ -1357,35 +1381,66 @@ static bool unruly_fill_game(game_state *state, struct unruly_scratch *scratch,
     return true;
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-                           char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    game_state *state;
+    struct unruly_scratch *scratch;
+    game_state* solver;
+    int *spaces;
+    int attempts;
+    char* desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w2 = dd->params->w2, h2 = dd->params->h2, s = w2 * h2;
+    bool unique = dd->params->unique;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->state = blank_state(w2, h2, unique, true);
+    gdd->scratch = unruly_new_scratch(gdd->state);
+    gdd->solver = dup_game(gdd->state);
+    gdd->spaces = snewn(s, int);
+    for (int i = 0; i < s; i++)
+        gdd->spaces[i] = i;
+    gdd->attempts = 0;
+
+    dd->desc = gdd->desc = snewn(s + 1, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
 {
 #ifdef STANDALONE_SOLVER
     char *debug;
     bool temp_verbose = false;
 #endif
 
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
     int w2 = params->w2, h2 = params->h2;
     int s = w2 * h2;
-    int *spaces;
+    int *spaces = gdd->spaces;
     int i, j, run;
-    char *ret, *p;
+    char *ret = gdd->desc, *p;
 
-    game_state *state;
-    struct unruly_scratch *scratch;
+    game_state *state = gdd->state;
+    struct unruly_scratch *scratch = gdd->scratch;
 
-    int attempts = 0;
-
-    while (1) {
+    bool solved = true;
+    {
 
         while (true) {
-            attempts++;
-            state = blank_state(w2, h2, params->unique, true);
-            scratch = unruly_new_scratch(state);
+            gdd->attempts++;
+            blank_state_reuse(w2, h2, params->unique, true, state);
+            unruly_new_scratch_reuse(state, scratch);
             if (unruly_fill_game(state, scratch, rs))
                 break;
-            free_game(state);
-            unruly_free_scratch(scratch);
         }
 
 #ifdef STANDALONE_SOLVER
@@ -1399,15 +1454,10 @@ static char *new_game_desc(const game_params *params, random_state *rs,
             solver_verbose = false;
         }
 #else
-        (void)attempts;
+        (void)gdd->attempts;
 #endif
 
-        unruly_free_scratch(scratch);
-
         /* Generate random array of spaces */
-        spaces = snewn(s, int);
-        for (i = 0; i < s; i++)
-            spaces[i] = i;
         shuffle(spaces, s, sizeof(*spaces), rs);
 
         /*
@@ -1417,25 +1467,21 @@ static char *new_game_desc(const game_params *params, random_state *rs,
          */
         for (j = 0; j < s; j++) {
             char c;
-            game_state *solver;
+            game_state *solver = gdd->solver;
 
             i = spaces[j];
 
             c = state->grid[i];
             state->grid[i] = EMPTY;
 
-            solver = dup_game(state);
-            scratch = unruly_new_scratch(state);
+            dup_game_reuse(state, gdd->solver);
+            unruly_new_scratch_reuse(state, scratch);
 
             unruly_solve_game(solver, scratch, params->diff);
 
             if (unruly_validate_counts(solver, scratch, NULL) != 0)
                 state->grid[i] = c;
-
-            free_game(solver);
-            unruly_free_scratch(scratch);
         }
-        sfree(spaces);
 
 #ifdef STANDALONE_SOLVER
         if (temp_verbose) {
@@ -1453,30 +1499,21 @@ static char *new_game_desc(const game_params *params, random_state *rs,
          */
         if (params->diff > 0) {
             bool ok;
-            game_state *solver;
+            game_state *solver = gdd->solver;
 
-            solver = dup_game(state);
-            scratch = unruly_new_scratch(state);
+            dup_game_reuse(state, solver);
+            unruly_new_scratch_reuse(state, scratch);
 
             unruly_solve_game(solver, scratch, params->diff - 1);
 
             ok = unruly_validate_counts(solver, scratch, NULL) > 0;
 
-            free_game(solver);
-            unruly_free_scratch(scratch);
-
-            if (ok)
-                break;
-        } else {
-            /*
-             * Puzzles of the easiest difficulty can't be too easy.
-             */
-            break;
+            if (!ok)
+                solved = false;
         }
     }
 
     /* Encode description */
-    ret = snewn(s + 1, char);
     p = ret;
     run = 0;
     for (i = 0; i < s+1; i++) {
@@ -1500,9 +1537,38 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     }
     *p = '\0';
 
-    free_game(state);
+    return solved;
+}
 
-    return ret;
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    free_game(gdd->state);
+    unruly_free_scratch(gdd->scratch);
+    free_game(gdd->solver);
+    sfree(gdd->spaces);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 /* ************** *
@@ -2058,6 +2124,9 @@ const struct game thegame = {
     false,                      /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,                          /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 /* ***************** *
