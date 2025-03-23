@@ -474,7 +474,7 @@ static game_state *blank_game(int w, int h)
     return state;
 }
 
-static void dup_game_to(game_state *to, const game_state *from)
+static game_state *dup_game_to(game_state *to, const game_state *from)
 {
     to->completed = from->completed;
     to->used_solve = from->used_solve;
@@ -489,6 +489,8 @@ static void dup_game_to(game_state *to, const game_state *from)
 
     dsf_copy(to->dsf, from->dsf);
     memcpy(to->numsi, from->numsi, (to->n+1)*sizeof(int));
+
+    return to;
 }
 
 static game_state *dup_game(const game_state *state)
@@ -563,14 +565,58 @@ done:
     }
 }
 
-static char *generate_desc(game_state *state, bool issolve)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    game_state *state;
+    game_state *tosolve;
+    int headi, taili;
+    int *aidx;
+    int *adir;
+    char *buf;
+    int desc_size;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
-    char *ret, buf[80];
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->state = blank_game(w, h);
+    gdd->tosolve = blank_game(w, h);
+    gdd->aidx = snewn(wh, int);
+    gdd->adir = snewn(wh, int);
+    gdd->buf = snewn(80, char);
+
+    gdd->desc_size = wh;
+    dd->desc = gdd->desc = snewn(gdd->desc_size, char);
+}
+
+static char *generate_desc_reuse(game_state *state, bool issolve, desc_data *dd)
+{
+    game_desc_data *gdd = dd ? dd->game_desc_data : NULL;
+    char *ret = gdd ? gdd->desc : NULL, *buf = gdd ? gdd->buf : snewn(80, char);
     int retlen, i, k;
 
-    ret = NULL; retlen = 0;
+    #define RESIZE(length) \
+        if (gdd) {\
+            if ((length) > gdd->desc_size) {\
+                gdd->desc_size = (length);\
+                dd->desc = gdd->desc = ret = sresize(gdd->desc, gdd->desc_size, char);\
+            }\
+        } else {\
+            ret = sresize(ret, (length), char);\
+        }
+
+
+    ret; retlen = 0;
     if (issolve) {
-        ret = sresize(ret, 2, char);
+        RESIZE(2);
         ret[0] = 'S'; ret[1] = '\0';
         retlen += 1;
     }
@@ -579,13 +625,20 @@ static char *generate_desc(game_state *state, bool issolve)
             k = sprintf(buf, "%d%c", state->nums[i], (int)(state->dirs[i]+'a'));
         else
             k = sprintf(buf, "%c", (int)(state->dirs[i]+'a'));
-        ret = sresize(ret, retlen + k + 1, char);
+        RESIZE(retlen + k + 1);
         strcpy(ret + retlen, buf);
         retlen += k;
+    }
+    if (!gdd) {
+        sfree(buf);
     }
     return ret;
 }
 
+static char *generate_desc(game_state *state, bool issolve)
+{
+    return generate_desc_reuse(state, issolve, NULL);
+}
 /* --- Game generation --- */
 
 /* Fills in preallocated arrays ai (indices) and ad (directions)
@@ -616,15 +669,25 @@ static int cell_adj(game_state *state, int i, int *ai, int *ad)
     return n;
 }
 
-static bool new_game_fill(game_state *state, random_state *rs,
-                          int headi, int taili)
+static bool new_game_fill(desc_data *dd)
 {
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    game_state *state = gdd->state;
+    const game_params *params = gdd->params;
+    if (params->force_corner_start) {
+        gdd->headi = 0;
+        gdd->taili = state->n-1;
+    } else {
+        do {
+            gdd->headi = random_upto(rs, state->n);
+            gdd->taili = random_upto(rs, state->n);
+        } while (gdd->headi == gdd->taili);
+    }
+    int headi = gdd->headi, taili = gdd->taili;
     int nfilled, an, j;
     bool ret = false;
-    int *aidx, *adir;
-
-    aidx = snewn(state->n, int);
-    adir = snewn(state->n, int);
+    int *aidx = gdd->aidx, *adir = gdd->adir;
 
     debug(("new_game_fill: headi=%d, taili=%d.", headi, taili));
 
@@ -676,8 +739,6 @@ static bool new_game_fill(game_state *state, random_state *rs,
     if (state->dirs[headi] != -1) ret = true;
 
 done:
-    sfree(aidx);
-    sfree(adir);
     return ret;
 }
 
@@ -810,31 +871,23 @@ done:
     return ret;
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+static bool attempt_new_desc(desc_data *dd)
 {
-    game_state *state = blank_game(params->w, params->h);
-    char *ret;
-    int headi, taili;
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
+    game_state *state = gdd->state;
 
     /* this shouldn't happen (validate_params), but let's play it safe */
-    if (params->w == 1 && params->h == 1) return dupstr("1a");
+    if (params->w == 1 && params->h == 1) {
+        dd->desc = gdd->desc = dupstr("1a");
+        return true;
+    }
 
-generate:
     blank_game_into(state);
 
-    /* keep trying until we fill successfully. */
-    do {
-        if (params->force_corner_start) {
-            headi = 0;
-            taili = state->n-1;
-        } else {
-            do {
-                headi = random_upto(rs, state->n);
-                taili = random_upto(rs, state->n);
-            } while (headi == taili);
-        }
-    } while (!new_game_fill(state, rs, headi, taili));
+    bool solved = new_game_fill(dd);
+    int headi = gdd->headi, taili = gdd->taili;
 
     debug_state("Filled game:", state);
 
@@ -846,18 +899,48 @@ generate:
 
     /* This will have filled in directions and _all_ numbers.
      * Store the game definition for this, as the solved-state. */
-    if (!new_game_strip(state, rs)) {
-        goto generate;
+    if (solved && !new_game_strip(state, rs)) {
+        solved = false;
     }
     strip_nums(state);
-    {
-        game_state *tosolve = dup_game(state);
+    if (solved) {
+        game_state *tosolve = dup_game_to(gdd->tosolve, state);
         assert(solve_state(tosolve) > 0);
-        free_game(tosolve);
     }
-    ret = generate_desc(state, false);
-    free_game(state);
-    return ret;
+    generate_desc_reuse(state, false, dd);
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    free_game(gdd->state);
+    free_game(gdd->tosolve);
+    sfree(gdd->aidx);
+    sfree(gdd->adir);
+    sfree(gdd->buf);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -2346,6 +2429,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON,		       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER
