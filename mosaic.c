@@ -714,18 +714,45 @@ static void generate_image(const game_params *params, random_state *rs,
     }
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-                           char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    bool *image;
+    struct desc_cell *desc_cell;
+    char *desc_string;
+    char *compressed_desc;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
-    bool *image = snewn(params->height * params->width, bool);
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->width, h = dd->params->height, wh = w * h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->image = snewn(wh, bool);
+
+    gdd->desc_cell = snewn(wh, struct desc_cell);
+    gdd->desc_string = snewn(wh + 1, char);
+    gdd->compressed_desc = snewn(wh + 1, char);
+    dd->desc = gdd->desc = snewn(wh + 1, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
+    bool *image = gdd->image;
     bool valid = false;
-    char *desc_string = snewn((params->height * params->width) + 1, char);
-    char *compressed_desc =
-        snewn((params->height * params->width) + 1, char);
+    char *desc_string = gdd->desc_string;
+    char *desc = gdd->desc;
     char space_count;
 
-    struct desc_cell *desc =
-        snewn(params->height * params->width, struct desc_cell);
+    struct desc_cell *desc_cell = gdd->desc_cell;
     int x, y, location_in_str;
 
     while (!valid) {
@@ -747,40 +774,40 @@ static char *new_game_desc(const game_params *params, random_state *rs,
                 populate_cell(params, image, x, y,
                               x * y == 0 || y == params->height - 1 ||
                               x == params->width - 1,
-                              &desc[(y * params->width) + x]);
+                              &desc_cell[(y * params->width) + x]);
             }
         }
         valid =
             start_point_check((params->height - 1) * (params->width - 1),
-                              desc);
+                              desc_cell);
         if (!valid) {
 #ifdef DEBUG_PRINTS
             printf("Not valid, regenerating.\n");
 #endif
         } else {
-            valid = solve_check(params, desc, rs, NULL);
+            valid = solve_check(params, desc_cell, rs, NULL);
             if (!valid) {
 #ifdef DEBUG_PRINTS
                 printf("Couldn't solve, regenerating.");
 #endif
             } else {
-                hide_clues(params, desc, rs);
+                hide_clues(params, desc_cell, rs);
             }
         }
     }
     location_in_str = 0;
     for (y = 0; y < params->height; y++) {
         for (x = 0; x < params->width; x++) {
-            if (desc[(y * params->width) + x].shown) {
+            if (desc_cell[(y * params->width) + x].shown) {
 #ifdef DEBUG_PRINTS
-                printf("%d(%d)", desc[(y * params->width) + x].value,
-                       desc[(y * params->width) + x].clue);
+                printf("%d(%d)", desc_cell[(y * params->width) + x].value,
+                       desc_cell[(y * params->width) + x].clue);
 #endif
                 sprintf(desc_string + location_in_str, "%d",
-                        desc[(y * params->width) + x].clue);
+                        desc_cell[(y * params->width) + x].clue);
             } else {
 #ifdef DEBUG_PRINTS
-                printf("%d( )", desc[(y * params->width) + x].value);
+                printf("%d( )", desc_cell[(y * params->width) + x].value);
 #endif
                 sprintf(desc_string + location_in_str, " ");
             }
@@ -794,21 +821,21 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     space_count = 'a' - 1;
     for (y = 0; y < params->height; y++) {
         for (x = 0; x < params->width; x++) {
-            if (desc[(y * params->width) + x].shown) {
+            if (desc_cell[(y * params->width) + x].shown) {
                 if (space_count >= 'a') {
-                    sprintf(compressed_desc + location_in_str, "%c",
+                    sprintf(desc + location_in_str, "%c",
                             space_count);
                     location_in_str++;
                     space_count = 'a' - 1;
                 }
-                sprintf(compressed_desc + location_in_str, "%d",
-                        desc[(y * params->width) + x].clue);
+                sprintf(desc + location_in_str, "%d",
+                        desc_cell[(y * params->width) + x].clue);
                 location_in_str++;
             } else {
                 if (space_count <= 'z') {
                     space_count++;
                 } else {
-                    sprintf(compressed_desc + location_in_str, "%c",
+                    sprintf(desc + location_in_str, "%c",
                             space_count);
                     location_in_str++;
                     space_count = 'a' - 1;
@@ -817,16 +844,44 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         }
     }
     if (space_count >= 'a') {
-        sprintf(compressed_desc + location_in_str, "%c", space_count);
+        sprintf(desc + location_in_str, "%c", space_count);
         location_in_str++;
     }
-    compressed_desc[location_in_str] = '\0';
+    desc[location_in_str] = '\0';
 #ifdef DEBUG_PRINTS
     printf("compressed_desc: %s\n", compressed_desc);
 #endif
-    return compressed_desc;
+    return true;
 }
 
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->image);
+    sfree(gdd->desc_cell);
+    sfree(gdd->desc_string);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
+}
 static const char *validate_desc(const game_params *params,
                                  const char *desc)
 {
@@ -1624,4 +1679,7 @@ const struct game thegame = {
     true,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
