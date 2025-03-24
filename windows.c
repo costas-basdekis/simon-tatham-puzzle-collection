@@ -1449,13 +1449,31 @@ static bool savefile_read(void *wctx, void *buf, int len)
     return (ret == len);
 }
 
+typedef struct get_new_game_desc_args {
+    midend *me;
+    frontend *fe;
+    new_game_desc_args *args;
+    clock_t start_time;
+    clock_t last_display_time;
+    int attempts;
+    bool solved;
+} get_new_game_desc_args;
+
 static int CALLBACK StopNewGameDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-    frontend *fe = (frontend *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    get_new_game_desc_args *thread_args = (get_new_game_desc_args *)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+    frontend *fe = thread_args->fe;
 
     switch (msg) {
         case WM_INITDIALOG:
             return 1;
+        case WM_TIMER:
+            clock_t now = clock();
+            char buf[64];
+            sprintf(buf, "Creating game, %d seconds and %d attempts so far...",
+                    (now - thread_args->start_time) / CLOCKS_PER_SEC, thread_args->attempts);
+            SetWindowText(fe->stop_new_game_label, buf);
+            break;
         case WM_COMMAND:
             if (LOWORD(wParam) == IDOK) {
                 fe->stop_new_game_dialog_done = true;
@@ -1468,16 +1486,6 @@ static int CALLBACK StopNewGameDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
     return 0;
 }
-
-typedef struct get_new_game_desc_args {
-    midend *me;
-    frontend *fe;
-    new_game_desc_args *args;
-    clock_t start_time;
-    clock_t last_display_time;
-    int attempts;
-    bool solved;
-} get_new_game_desc_args;
 
 DWORD WINAPI get_new_game_desc_thread(void *arg);
 
@@ -1551,7 +1559,7 @@ static void make_stop_new_game_window(get_new_game_desc_args *thread_args)
 
     SendMessage(fe->stop_new_game_window, WM_SETFONT, (WPARAM)fe->cfgfont, false);
 
-    SetWindowLongPtr(fe->stop_new_game_window, GWLP_USERDATA, (LONG_PTR)fe);
+    SetWindowLongPtr(fe->stop_new_game_window, GWLP_USERDATA, (LONG_PTR)thread_args);
     SetWindowLongPtr(fe->stop_new_game_window, DWLP_DLGPROC, (LONG_PTR)StopNewGameDlgProc);
 
     fe->stop_new_game_label = CreateWindowEx(0, "Static", "Creating new game...",
@@ -1572,6 +1580,7 @@ BS_PUSHBUTTON | WS_TABSTOP | BS_DEFPUSHBUTTON | WS_CHILD | WS_VISIBLE,
     EnableMenuItem(fe->gamemenu, IDM_NEW, MF_DISABLED);
 
     CreateThread(NULL, 0, get_new_game_desc_thread, thread_args, 0, NULL);
+    UINT_PTR timer = SetTimer(fe->stop_new_game_window, 1, 5000, NULL);
 
     MSG msg;
     int gm;
@@ -1585,6 +1594,7 @@ BS_PUSHBUTTON | WS_TABSTOP | BS_DEFPUSHBUTTON | WS_CHILD | WS_VISIBLE,
     }
     EnableWindow(fe->hwnd, true);
     SetForegroundWindow(fe->hwnd);
+    KillTimer(fe->stop_new_game_window, timer);
     DestroyWindow(fe->stop_new_game_window);
     fe->stop_new_game_window = NULL;
     fe->stop_new_game_label = NULL;
