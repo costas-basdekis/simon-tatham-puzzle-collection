@@ -581,6 +581,9 @@ typedef struct new_game_desc_args {
 
 void new_game_async_attempt(midend *me, new_game_desc_args *args)
 {
+    if (!args->desc || args->desc[0] == '\0') {
+        return;
+    }
     midend_create_game_inner(me, args, true);
     midend_solve(me);
     midend_redraw(me);
