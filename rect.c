@@ -1146,18 +1146,63 @@ static void display_grid(game_params *params, int *grid, int *numbers, int all)
 }
 #endif
 
-static char *new_game_desc(const game_params *params_in, random_state *rs,
-			   char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    int *grid;
+    int *enum_rects_scratch;
+    int *grid2;
+    int *expand;
+    int *where;
+    struct numberdata *nd;
+    int nd_size;
+    int *numbers;
+    char *desc;
+    char *aux;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h, expandfactor = gdd->params->expandfactor;
+
+    int shrunk_w = (int)((float)w / (1.0F + expandfactor));
+    int shrunk_h = (int)((float)h / (1.0F + expandfactor));
+    gdd->grid = snewn(shrunk_w * shrunk_h, int);
+    gdd->enum_rects_scratch = snewn(2 * shrunk_w, int);
+
+    gdd->grid2 = snewn(shrunk_w * h, int);
+    gdd->expand = snewn(shrunk_h - 1, int);
+    gdd->where = snewn(shrunk_w, int);
+
+    gdd->nd_size = 100;
+    gdd->nd = snewn(gdd->nd_size, struct numberdata);
+
+    gdd->numbers = snewn(wh, int);
+
+    dd->desc = gdd->desc = snewn(11 * wh, char);
+    dd->aux = gdd->aux = snewn(2 + (w - 1) * h + (h - 1) * w, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params_in = gdd->params;
+    random_state *rs = gdd->rs;
     game_params params_copy = *params_in; /* structure copy */
     game_params *params = &params_copy;
-    int *grid, *numbers = NULL;
+    int *grid = gdd->grid, *numbers = gdd->numbers;
     int x, y, y2, y2last, yx, run, i, nsquares;
     char *desc, *p;
-    int *enum_rects_scratch;
+    int *enum_rects_scratch = gdd->enum_rects_scratch;
     game_params params2real, *params2 = &params2real;
 
-    while (1) {
+    bool solved = true;
+    {
         /*
          * Set up the smaller width and height which we will use to
          * generate the base grid.
@@ -1166,10 +1211,6 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
         if (params2->w < 2 && params->w >= 2) params2->w = 2;
         params2->h = (int)((float)params->h / (1.0F + params->expandfactor));
         if (params2->h < 2 && params->h >= 2) params2->h = 2;
-
-        grid = snewn(params2->w * params2->h, int);
-
-        enum_rects_scratch = snewn(2 * params2->w, int);
 
         nsquares = 0;
         for (y = 0; y < params2->h; y++)
@@ -1228,8 +1269,6 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
                 nsquares -= r.w * r.h;
             }
         }
-
-        sfree(enum_rects_scratch);
 
         /*
          * Deal with singleton spaces remaining in the grid, one by
@@ -1446,7 +1485,7 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
          * width), then finally transpose again.
          */
         for (i = 0; i < 2; i++) {
-            int *grid2, *expand, *where;
+            int *grid2 = gdd->grid2, *expand = gdd->expand, *where = gdd->where;
             game_params params3real, *params3 = &params3real;
 
 #ifdef GENERATION_DIAGNOSTICS
@@ -1457,9 +1496,6 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
             /*
              * Set up the new grid.
              */
-            grid2 = snewn(params2->w * params->h, int);
-            expand = snewn(params2->h-1, int);
-            where = snewn(params2->w, int);
             params3->w = params2->w;
             params3->h = params->h;
 
@@ -1574,9 +1610,6 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
                 }
             }
 
-            sfree(expand);
-            sfree(where);
-
 #ifdef GENERATION_DIAGNOSTICS
             printf("after expansion:\n");
             display_grid(params3, grid2, NULL, true);
@@ -1586,8 +1619,6 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
              */
             params2->w = params3->h;
             params2->h = params3->w;
-            sfree(grid);
-            grid = snewn(params2->w * params2->h, int);
             for (x = 0; x < params2->w; x++)
                 for (y = 0; y < params2->h; y++) {
                     int idx1 = INDEX(params2, x, y);
@@ -1598,8 +1629,6 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
                     tmp = (tmp % params3->w) * params2->w + (tmp / params3->w);
                     grid[idx1] = tmp;
                 }
-
-            sfree(grid2);
 
             {
                 int tmp;
@@ -1619,7 +1648,7 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
          * placements.
          */
         {
-            struct numberdata *nd;
+            struct numberdata *nd = gdd->nd;
             int nnumbers, i, ret;
 
             /* Count the rectangles. */
@@ -1631,8 +1660,10 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
                         nnumbers++;
                 }
             }
-
-            nd = snewn(nnumbers, struct numberdata);
+            if (nnumbers > gdd->nd_size) {
+                gdd->nd_size = nnumbers;
+                nd = gdd->nd = sresize(gdd->nd, gdd->nd_size, struct numberdata);
+            }
 
             /* Now set up each number's candidate position list. */
             i = 0;
@@ -1671,7 +1702,6 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
                  * Now place the numbers according to the solver's
                  * recommendations.
                  */
-                numbers = snewn(params->w * params->h, int);
 
                 for (y = 0; y < params->h; y++)
                     for (x = 0; x < params->w; x++) {
@@ -1691,30 +1721,22 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
              */
             for (i = 0; i < nnumbers; i++)
                 sfree(nd[i].points);
-            sfree(nd);
 
             /*
              * If we've succeeded, then terminate the loop.
              */
-            if (ret == 1)
-                break;
+            solved = ret == 1;
         }
-
-        /*
-         * Give up and go round again.
-         */
-        sfree(grid);
     }
 
     /*
      * Store the solution in aux.
      */
     {
-        char *ai;
+        char *ai = gdd->aux;
         int len;
 
         len = 2 + (params->w-1)*params->h + (params->h-1)*params->w;
-        ai = snewn(len, char);
 
         ai[0] = 'S';
 
@@ -1732,15 +1754,13 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
 
         assert(p - ai == len-1);
         *p = '\0';
-
-        *aux = ai;
     }
 
 #ifdef GENERATION_DIAGNOSTICS
     display_grid(params, grid, numbers, false);
 #endif
 
-    desc = snewn(11 * params->w * params->h, char);
+    desc = gdd->desc;
     p = desc;
     run = 0;
     for (i = 0; i <= params->w * params->h; i++) {
@@ -1773,10 +1793,46 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
     }
     *p = '\0';
 
-    sfree(grid);
-    sfree(numbers);
+    return solved;
+}
 
-    return desc;
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->grid);
+    sfree(gdd->enum_rects_scratch);
+
+    sfree(gdd->grid2);
+    sfree(gdd->expand);
+    sfree(gdd->where);
+
+    sfree(gdd->nd);
+
+    sfree(gdd->numbers);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -3019,6 +3075,9 @@ const struct game thegame = {
     true,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 /* vim: set shiftwidth=4 tabstop=8: */

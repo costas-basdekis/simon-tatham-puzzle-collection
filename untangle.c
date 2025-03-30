@@ -2064,4 +2064,6 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     SOLVE_ANIMATES,		       /* flags */
+    // There is no need for iterative game creation, we don't have to search for a solvable game
+    NULL, NULL, NULL
 };

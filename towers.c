@@ -643,15 +643,45 @@ static int solver(int w, int *clues, digit *soln, int maxdiff)
  * Grid generation.
  */
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
-{
-    int w = params->w, a = w*w;
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
     digit *grid, *soln, *soln2;
     int *clues, *order;
+    char *desc;
+    char *aux;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, a = w * w;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->grid = snewn(a, digit);
+    gdd->clues = snewn(4 * w, int);
+    gdd->soln = snewn(a, digit);
+    gdd->soln2 = snewn(a, digit);
+    gdd->order = snewn(max(4 * w,a), int);
+
+    dd->desc = gdd->desc = snewn(40 * a, char);
+    dd->aux = gdd->aux = snewn(a + 2, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
+    int w = params->w, a = w*w;
+    digit *grid = gdd->grid, *soln = gdd->soln, *soln2 = gdd->soln2;
+    int *clues = gdd->clues, *order = gdd->order;
     int i, ret;
     int diff = params->diff;
-    char *desc, *p;
+    char *desc = gdd->desc, *p;
 
     /*
      * Difficulty exceptions: some combinations of size and
@@ -678,18 +708,12 @@ done
     if (diff > DIFF_HARD && w <= 3)
 	diff = DIFF_HARD;
 
-    grid = NULL;
-    clues = snewn(4*w, int);
-    soln = snewn(a, digit);
-    soln2 = snewn(a, digit);
-    order = snewn(max(4*w,a), int);
-
-    while (1) {
+    bool solved = true;
+    {
 	/*
 	 * Construct a latin square to be the solution.
 	 */
-	sfree(grid);
-	grid = latin_generate(w, rs);
+	latin_generate_reuse(w, rs, gdd->grid);
 
 	/*
 	 * Fill in the clues.
@@ -723,7 +747,7 @@ done
 	    memset(soln2, 0, a);
 	    ret = solver(w, clues, soln2, diff);
 	    if (ret > diff)
-		continue;
+		solved = false;
 	}
 
 	for (i = 0; i < a; i++)
@@ -762,18 +786,12 @@ done
 	memcpy(soln2, grid, a);
 	ret = solver(w, clues, soln2, diff);
 	if (ret != diff)
-	    continue;		       /* go round again */
-
-	/*
-	 * We've got a usable puzzle!
-	 */
-	break;
+	    solved = false;		       /* go round again */
     }
 
     /*
      * Encode the puzzle description.
      */
-    desc = snewn(40*a, char);
     p = desc;
     for (i = 0; i < 4*w; i++) {
         if (i)
@@ -817,29 +835,55 @@ done
 	}
     }
     *p++ = '\0';
-    desc = sresize(desc, p - desc, char);
 
     /*
      * Encode the solution.
      */
-    *aux = snewn(a+2, char);
-    (*aux)[0] = 'S';
+    gdd->aux[0] = 'S';
     for (i = 0; i < a; i++)
-	(*aux)[i+1] = '0' + soln[i];
-    (*aux)[a+1] = '\0';
+	gdd->aux[i+1] = '0' + soln[i];
+    gdd->aux[a+1] = '\0';
 
-    sfree(grid);
-    sfree(clues);
-    sfree(soln);
-    sfree(soln2);
-    sfree(order);
-
-    return desc;
+    return true;
 }
 
 /* ----------------------------------------------------------------------
  * Gameplay.
  */
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->grid);
+    sfree(gdd->clues);
+    sfree(gdd->soln);
+    sfree(gdd->soln2);
+    sfree(gdd->order);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
+}
 
 static const char *validate_desc(const game_params *params, const char *desc)
 {
@@ -2161,6 +2205,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON | REQUIRE_NUMPAD,  /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER

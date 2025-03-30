@@ -998,15 +998,54 @@ static int slant_solve(int w, int h, const signed char *clues,
     return 1;			       /* success */
 }
 
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    signed char *soln;
+    signed char *tmpsoln;
+    signed char *clues;
+    int *clueindices;
+    struct solver_scratch *sc;
+    DSF *connected;
+    int *indices;
+    char *desc;
+    char *aux;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h, W = w+1, H = h+1;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->soln = snewn(w * h, signed char);
+    gdd->tmpsoln = snewn(w * h, signed char);
+    gdd->clues = snewn(W * H, signed char);
+    gdd->clueindices = snewn(W * H, int);
+    gdd->sc = new_scratch(w, h);
+    gdd->connected = dsf_new(W * H);
+    gdd->indices = snewn(w*h, int);
+
+    dd->desc = gdd->desc = snewn(wh + 1, char);
+    dd->aux = gdd->aux = snewn(w*h+1, char);
+}
+
 /*
  * Filled-grid generator.
  */
-static void slant_generate(int w, int h, signed char *soln, random_state *rs)
+static void slant_generate(desc_data *dd)
 {
+    game_desc_data *gdd = dd->game_desc_data;
+    int w = gdd->params->w, h = gdd->params->h;
+    signed char *soln = gdd->soln;
+    random_state *rs = gdd->rs;
     int W = w+1, H = h+1;
     int x, y, i;
-    DSF *connected;
-    int *indices;
+    DSF *connected = gdd->connected;
+    int *indices = gdd->indices;
 
     /*
      * Clear the output.
@@ -1017,13 +1056,12 @@ static void slant_generate(int w, int h, signed char *soln, random_state *rs)
      * Establish a disjoint set forest for tracking connectedness
      * between grid points.
      */
-    connected = dsf_new(W*H);
+    dsf_reinit(connected);
 
     /*
      * Prepare a list of the squares in the grid, and fill them in
      * in a random order.
      */
-    indices = snewn(w*h, int);
     for (i = 0; i < w*h; i++)
 	indices[i] = i;
     shuffle(indices, w*h, sizeof(*indices), rs);
@@ -1071,32 +1109,25 @@ static void slant_generate(int w, int h, signed char *soln, random_state *rs)
 	v = fs ? +1 : bs ? -1 : 2 * random_upto(rs, 2) - 1;
 	fill_square(w, h, x, y, v, soln, connected, NULL);
     }
-
-    sfree(indices);
-    dsf_free(connected);
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+static bool attempt_new_desc(desc_data *dd)
 {
-    int w = params->w, h = params->h, W = w+1, H = h+1;
-    signed char *soln, *tmpsoln, *clues;
-    int *clueindices;
-    struct solver_scratch *sc;
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    const game_params *params = gdd->params;
+    int w = gdd->params->w, h = gdd->params->h, W = w+1, H = h+1;
+    signed char *soln = gdd->soln, *tmpsoln = gdd->tmpsoln, *clues = gdd->clues;
+    int *clueindices = gdd->clueindices;
+    struct solver_scratch *sc = gdd->sc;
     int x, y, v, i, j;
     char *desc;
-
-    soln = snewn(w*h, signed char);
-    tmpsoln = snewn(w*h, signed char);
-    clues = snewn(W*H, signed char);
-    clueindices = snewn(W*H, int);
-    sc = new_scratch(w, h);
 
     do {
 	/*
 	 * Create the filled grid.
 	 */
-	slant_generate(w, h, soln, rs);
+	slant_generate(dd);
 
 	/*
 	 * Fill in the complete set of clues.
@@ -1182,7 +1213,7 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 	char *p;
 	int run, i;
 
-	desc = snewn(W*H+1, char);
+	desc = gdd->desc;
 	p = desc;
 	run = 0;
 	for (i = 0; i <= W*H; i++) {
@@ -1207,27 +1238,55 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 	}
 	assert(p - desc <= W*H);
 	*p++ = '\0';
-	desc = sresize(desc, p - desc, char);
     }
 
     /*
      * Encode the solution as an aux_info.
      */
     {
-	char *auxbuf;
-	*aux = auxbuf = snewn(w*h+1, char);
+	char *auxbuf = gdd->aux;
 	for (i = 0; i < w*h; i++)
 	    auxbuf[i] = soln[i] < 0 ? '\\' : '/';
 	auxbuf[w*h] = '\0';
     }
 
-    free_scratch(sc);
-    sfree(clueindices);
-    sfree(clues);
-    sfree(tmpsoln);
-    sfree(soln);
-
     return desc;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->soln);
+    sfree(gdd->tmpsoln);
+    sfree(gdd->clues);
+    sfree(gdd->clueindices);
+    free_scratch(gdd->sc);
+    dsf_free(gdd->connected);
+    sfree(gdd->indices);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -2308,6 +2367,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER

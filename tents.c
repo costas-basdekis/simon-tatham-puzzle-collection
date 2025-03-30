@@ -905,26 +905,69 @@ static int tents_solve(int w, int h, const char *grid, int *numbers,
     return 1;
 }
 
-static char *new_game_desc(const game_params *params_in, random_state *rs,
-			   char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    char *grid;
+    char *puzzle;
+    int *numbers;
+    char *soln;
+    int *order;
+    int *treemap;
+    int *adjdata;
+    int **adjlists;
+    int *adjsizes;
+    int *outr;
+    struct solver_scratch *sc;
+    char *desc;
+    char *aux;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
-    game_params params_copy = *params_in; /* structure copy */
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h, ntrees = wh / 5, maxedges = ntrees * 4 + wh;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->grid = snewn(w*h, char);
+    gdd->puzzle = snewn(w*h, char);
+    gdd->numbers = snewn(w+h, int);
+    gdd->soln = snewn(w*h, char);
+    gdd->order = snewn(w*h, int);
+    gdd->treemap = snewn(w*h, int);
+    gdd->adjdata = snewn(maxedges, int);
+    gdd->adjlists = snewn(ntrees, int *);
+    gdd->adjsizes = snewn(ntrees, int);
+    gdd->outr = snewn(4*ntrees, int);
+    gdd->sc = new_scratch(w, h);
+
+    dd->desc = gdd->desc = snewn((w + h) * 40 + ntrees + wh / 26 + 1, char);
+    dd->aux = gdd->aux = snewn(ntrees * 40, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    game_params params_copy = *gdd->params; /* structure copy */
     game_params *params = &params_copy;
     int w = params->w, h = params->h;
     int ntrees = w * h / 5;
-    char *grid = snewn(w*h, char);
-    char *puzzle = snewn(w*h, char);
-    int *numbers = snewn(w+h, int);
-    char *soln = snewn(w*h, char);
-    int *order = snewn(w*h, int);
-    int *treemap = snewn(w*h, int);
-    int maxedges = ntrees*4 + w*h;
-    int *adjdata = snewn(maxedges, int);
-    int **adjlists = snewn(ntrees, int *);
-    int *adjsizes = snewn(ntrees, int);
-    int *outr = snewn(4*ntrees, int);
-    struct solver_scratch *sc = new_scratch(w, h);
-    char *ret, *p;
+    char *grid = gdd->grid;
+    char *puzzle = gdd->puzzle;
+    int *numbers = gdd->numbers;
+    char *soln = gdd->soln;
+    int *order = gdd->order;
+    int *treemap = gdd->treemap;
+    int *adjdata = gdd->adjdata;
+    int **adjlists = gdd->adjlists;
+    int *adjsizes = gdd->adjsizes;
+    int *outr = gdd->outr;
+    struct solver_scratch *sc = gdd->sc;
+    char *ret = gdd->desc, *p;
     int i, j, nl, nr;
     int *adjptr;
 
@@ -978,7 +1021,8 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
     if (params->diff > DIFF_EASY && params->w <= 4 && params->h <= 4)
 	params->diff = DIFF_EASY;      /* downgrade to prevent tight loop */
 
-    while (1) {
+    bool solved = true;
+    {
 	/*
 	 * Make a list of grid squares which we'll permute as we pick
 	 * the tent locations.
@@ -1033,7 +1077,7 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
 	    }
 	}
 	if (j > 0)
-	    continue;		       /* couldn't place all the tents */
+	    solved = false;		       /* couldn't place all the tents */
 
 	/*
 	 * Build up the graph for matching.c.
@@ -1059,10 +1103,12 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
 	/*
 	 * Call the matching algorithm to actually place the trees.
 	 */
-	j = matching(ntrees, nr, adjlists, adjsizes, rs, NULL, outr);
+        if (solved) {
+            j = matching(ntrees, nr, adjlists, adjsizes, rs, NULL, outr);
 
-	if (j < ntrees)
-	    continue;		       /* couldn't place all the trees */
+            if (j < ntrees)
+                solved = false;		       /* couldn't place all the trees */
+        }
 
 	/*
 	 * Fill in the trees in the grid, by cross-referencing treemap
@@ -1094,7 +1140,7 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
 		break;		       /* found empty column */
 	}
 	if (i < w)
-	    continue;		       /* a column was empty */
+	    solved = false;		       /* a column was empty */
 
 	for (j = 0; j < h; j++) {
 	    for (i = 0; i < w; i++) {
@@ -1105,7 +1151,7 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
 		break;		       /* found empty row */
 	}
 	if (j < h)
-	    continue;		       /* a row was empty */
+	    solved = false;		       /* a row was empty */
 
 	/*
 	 * Now set up the numbers round the edge.
@@ -1140,14 +1186,13 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
          * solving with diff-1 to have failed (otherwise it's too
          * easy).
          */
-	if (i == 2 && j == 1)
-	    break;
+	if (!(i == 2 && j == 1))
+	    solved = false;
     }
 
     /*
      * That's it. Encode as a game ID.
      */
-    ret = snewn((w+h)*40 + ntrees + (w*h)/26 + 1, char);
     p = ret;
     j = 0;
     for (i = 0; i <= w*h; i++) {
@@ -1166,33 +1211,58 @@ static char *new_game_desc(const game_params *params_in, random_state *rs,
     for (i = 0; i < w+h; i++)
 	p += sprintf(p, ",%d", numbers[i]);
     *p++ = '\0';
-    ret = sresize(ret, p - ret, char);
 
     /*
      * And encode the solution as an aux_info.
      */
-    *aux = snewn(ntrees * 40, char);
-    p = *aux;
+    p = gdd->aux;
     *p++ = 'S';
     for (i = 0; i < w*h; i++)
         if (grid[i] == TENT)
             p += sprintf(p, ";T%d,%d", i%w, i/w);
     *p++ = '\0';
-    *aux = sresize(*aux, p - *aux, char);
 
-    free_scratch(sc);
-    sfree(outr);
-    sfree(adjdata);
-    sfree(adjlists);
-    sfree(adjsizes);
-    sfree(treemap);
-    sfree(order);
-    sfree(soln);
-    sfree(numbers);
-    sfree(puzzle);
-    sfree(grid);
+    return solved;
+}
 
-    return ret;
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->grid);
+    sfree(gdd->puzzle);
+    sfree(gdd->numbers);
+    sfree(gdd->soln);
+    sfree(gdd->order);
+    sfree(gdd->treemap);
+    sfree(gdd->adjdata);
+    sfree(gdd->adjlists);
+    sfree(gdd->adjsizes);
+    sfree(gdd->outr);
+    free_scratch(gdd->sc);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 /*
@@ -2674,6 +2744,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON,		       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER

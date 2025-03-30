@@ -158,6 +158,7 @@ enum {
 static unsigned long sum_bits2[18][MAX_2SUMS];
 static unsigned long sum_bits3[25][MAX_3SUMS];
 static unsigned long sum_bits4[31][MAX_4SUMS];
+static bool have_sum_bits = false;
 
 static int find_sum_bits(unsigned long *array, int idx, int value_left,
 			 int addends_left, int min_addend,
@@ -187,6 +188,9 @@ static int find_sum_bits(unsigned long *array, int idx, int value_left,
 
 static void precompute_sum_bits(void)
 {
+    if (have_sum_bits) {
+        return;
+    }
     int i;
     for (i = 3; i < 31; i++) {
 	int j;
@@ -207,6 +211,7 @@ static void precompute_sum_bits(void)
 	if (j < MAX_4SUMS)
 	    sum_bits4[i][j] = 0;
     }
+    have_sum_bits = true;
 }
 
 struct game_params {
@@ -3189,10 +3194,10 @@ static int symmetries(const game_params *params, int x, int y,
     return i;
 }
 
-static char *encode_solve_move(int cr, digit *grid)
+static char *encode_solve_move_reuse(int cr, digit *grid, char *existing, int *aux_size)
 {
     int i, len;
-    char *ret, *p;
+    char *ret = existing, *p;
     const char *sep;
 
     /*
@@ -3219,7 +3224,12 @@ static char *encode_solve_move(int cr, digit *grid)
      */
     len++;
 
-    ret = snewn(len, char);
+    if (!ret || len > (aux_size ? *aux_size : 0)) {
+        ret = sresize(ret, len, char);
+        if (aux_size) {
+            *aux_size = len;
+        }
+    }
     p = ret;
     *p++ = 'S';
     sep = "";
@@ -3231,6 +3241,11 @@ static char *encode_solve_move(int cr, digit *grid)
     assert(p - ret == len);
 
     return ret;
+}
+
+static char *encode_solve_move(int cr, digit *grid)
+{
+    return encode_solve_move_reuse(cr, grid, NULL, NULL);
 }
 
 static void dsf_to_blocks(DSF *dsf, struct block_structure *blocks,
@@ -3384,11 +3399,11 @@ static int blocks_encode_space(struct block_structure *blocks)
 static char *encode_puzzle_desc(const game_params *params, digit *grid,
 				struct block_structure *blocks,
 				digit *kgrid,
-				struct block_structure *kblocks)
+				struct block_structure *kblocks, char **desc_ptr, int *desc_size)
 {
     int c = params->c, r = params->r, cr = c*r;
     int area = cr*cr;
-    char *p, *desc;
+    char *p, *desc = *desc_ptr;
     int space;
 
     space = grid_encode_space(area) + 1;
@@ -3398,7 +3413,10 @@ static char *encode_puzzle_desc(const game_params *params, digit *grid,
 	space += blocks_encode_space(kblocks) + 1;
 	space += grid_encode_space(area) + 1;
     }
-    desc = snewn(space, char);
+    if (space > *desc_size) {
+        *desc_ptr = desc = sresize(desc, space, char);
+        *desc_size = space;
+    }
     p = encode_grid(desc, grid, area);
 
     if (r == 1) {
@@ -3644,16 +3662,54 @@ static key_label *game_request_keys(const game_params *params, int *nkeys)
     return keys;
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+typedef struct xy { int x, y; } xy;
+
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    struct block_structure *blocks;
+    digit *grid, *grid2, *kgrid;
+    xy *locs;
+    int desc_size;
+    char *desc;
+    int aux_size;
+    char *aux;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int c = dd->params->c, r = dd->params->r, cr = c*r;
+    int area = cr*cr;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->grid = snewn(area, digit);
+    gdd->locs = snewn(area, struct xy);
+    gdd->grid2 = snewn(area, digit);
+    gdd->blocks = alloc_block_structure(c, r, area, cr, cr);
+    gdd->kgrid = (gdd->params->killer) ? snewn(area, digit) : NULL;
+
+    gdd->desc_size = cr;
+    dd->desc = gdd->desc = snewn(gdd->desc_size, char);
+    gdd->aux_size = cr;
+    dd->aux = gdd->aux = snewn(gdd->aux_size, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
     int c = params->c, r = params->r, cr = c*r;
     int area = cr*cr;
-    struct block_structure *blocks, *kblocks;
-    digit *grid, *grid2, *kgrid;
-    struct xy { int x, y; } *locs;
+    struct block_structure *blocks = gdd->blocks, *kblocks = NULL;
+    digit *grid = gdd->grid, *grid2 = gdd->grid2, *kgrid = gdd->kgrid;
+    xy *locs = gdd->locs;
     int nlocs;
-    char *desc;
+    char *desc = gdd->desc;
     int coords[16], ncoords;
     int x, y, i, j;
     struct difficulty dlev;
@@ -3672,15 +3728,6 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     if ((c == 2 && r == 2) || (r == 1 && c < 4))
         dlev.maxdiff = DIFF_BLOCK;
 
-    grid = snewn(area, digit);
-    locs = snewn(area, struct xy);
-    grid2 = snewn(area, digit);
-
-    blocks = alloc_block_structure (c, r, area, cr, cr);
-
-    kblocks = NULL;
-    kgrid = (params->killer) ? snewn(area, digit) : NULL;
-
 #ifdef STANDALONE_SOLVER
     assert(!"This should never happen, so we don't need to create blocknames");
 #endif
@@ -3690,7 +3737,8 @@ static char *new_game_desc(const game_params *params, random_state *rs,
      * nasty, but it seems to be unpleasantly hard to generate
      * difficult grids otherwise.
      */
-    while (1) {
+    bool solved = true;
+    {
         /*
          * Generate a random solved state, starting by
          * constructing the block structure.
@@ -3714,24 +3762,13 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 	}
 
         if (!gridgen(cr, blocks, kblocks, params->xtype, grid, rs, area*area))
-	    continue;
+	    solved = false;
         assert(check_valid(cr, blocks, kblocks, NULL, params->xtype, grid));
 
 	/*
 	 * Save the solved grid in aux.
 	 */
-	{
-	    /*
-	     * We might already have written *aux the last time we
-	     * went round this loop, in which case we should free
-	     * the old aux before overwriting it with the new one.
-	     */
-            if (*aux) {
-		sfree(*aux);
-            }
-
-            *aux = encode_solve_move(cr, grid);
-	}
+        dd->aux = gdd->aux = encode_solve_move_reuse(cr, grid, gdd->aux, &gdd->aux_size);
 
 	/*
 	 * Now we have a solved grid. For normal puzzles, we start removing
@@ -3803,9 +3840,8 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 		kblocks = good_cages;
 		compute_kclues(kblocks, kgrid, grid2, area);
 		memset(grid, 0, area * sizeof *grid);
-		break;
 	    }
-	    continue;
+	    solved = false;
 	}
 
         /*
@@ -3861,28 +3897,54 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         memcpy(grid2, grid, area);
 
 	solver(cr, blocks, kblocks, params->xtype, grid2, kgrid, &dlev);
-	if (dlev.diff == dlev.maxdiff &&
-	    (!params->killer || dlev.kdiff == dlev.maxkdiff))
-	    break;		       /* found one! */
+	if (!(dlev.diff == dlev.maxdiff &&
+	    (!params->killer || dlev.kdiff == dlev.maxkdiff)))
+	    solved = false;
     }
-
-    sfree(grid2);
-    sfree(locs);
 
     /*
      * Now we have the grid as it will be presented to the user.
      * Encode it in a game desc.
      */
-    desc = encode_puzzle_desc(params, grid, blocks, kgrid, kblocks);
+    dd->desc = gdd->desc = encode_puzzle_desc(params, grid, blocks, kgrid, kblocks, &gdd->desc, &gdd->desc_size);
 
-    sfree(grid);
-    free_block_structure(blocks);
     if (params->killer) {
         free_block_structure(kblocks);
-        sfree(kgrid);
     }
 
-    return desc;
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->grid);
+    sfree(gdd->locs);
+    sfree(gdd->grid2);
+    free_block_structure(gdd->blocks);
+    sfree(gdd->kgrid);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *spec_to_grid(const char *desc, digit *grid, int area)
@@ -5702,6 +5764,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON | REQUIRE_NUMPAD,  /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER

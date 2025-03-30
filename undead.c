@@ -249,10 +249,13 @@ struct game_state {
     bool cheated;
 };
 
-static game_state *new_state(const game_params *params) {
+static game_state *new_state_reuse(const game_params *params, game_state *existing_state) {
     int i;
-    game_state *state = snew(game_state);
-    state->common = snew(struct game_common);
+    game_state *state = existing_state;
+    if (!existing_state) {
+        state = snew(game_state);
+        state->common = snew(struct game_common);
+    }
 
     state->common->refcount = 1;
     state->common->params.w = params->w;
@@ -266,13 +269,18 @@ static game_state *new_state(const game_params *params) {
     state->common->num_zombies = 0;
     state->common->num_total = 0;
 
-    state->common->grid = snewn(state->common->wh, int);
-    state->common->xinfo = snewn(state->common->wh, int);
     state->common->fixed = NULL;
 
     state->common->num_paths =
         state->common->params.w + state->common->params.h;
-    state->common->paths = snewn(state->common->num_paths, struct path);
+    if (!existing_state) {
+        state->common->grid = snewn(state->common->wh, int);
+        state->common->xinfo = snewn(state->common->wh, int);
+        state->common->paths = snewn(state->common->num_paths, struct path);
+        state->cell_errors = snewn(state->common->wh, bool);
+        state->hint_errors = snewn(2*state->common->num_paths, bool);
+        state->hints_done = snewn(2 * state->common->num_paths, bool);
+    }
 
     for (i=0;i<state->common->num_paths;i++) {
         state->common->paths[i].length = 0;
@@ -281,21 +289,20 @@ static game_state *new_state(const game_params *params) {
         state->common->paths[i].num_monsters = 0;
         state->common->paths[i].sightings_start = 0;
         state->common->paths[i].sightings_end = 0;
-        state->common->paths[i].p = snewn(state->common->wh,int);
-        state->common->paths[i].xy = snewn(state->common->wh,int);
-        state->common->paths[i].mapping = snewn(state->common->wh,int);
+        if (!existing_state) {
+            state->common->paths[i].p = snewn(state->common->wh,int);
+            state->common->paths[i].xy = snewn(state->common->wh,int);
+            state->common->paths[i].mapping = snewn(state->common->wh,int);
+        }
     }
 
     state->guess = NULL;
     state->pencils = NULL;
 
-    state->cell_errors = snewn(state->common->wh, bool);
     for (i=0;i<state->common->wh;i++)
         state->cell_errors[i] = false;
-    state->hint_errors = snewn(2*state->common->num_paths, bool);
     for (i=0;i<2*state->common->num_paths;i++)
         state->hint_errors[i] = false;
-    state->hints_done = snewn(2 * state->common->num_paths, bool);
     memset(state->hints_done, 0,
            2 * state->common->num_paths * sizeof(bool));
     for (i=0;i<3;i++)
@@ -305,6 +312,11 @@ static game_state *new_state(const game_params *params) {
     state->cheated = false;
     
     return state;
+}
+
+static game_state *new_state(const game_params *params)
+{
+    return new_state_reuse(params, NULL);
 }
 
 static game_state *dup_game(const game_state *state)
@@ -980,32 +992,58 @@ static int path_cmp(const void *a, const void *b) {
     return pa->num_monsters - pb->num_monsters;
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-                           char **aux, bool interactive) {
-    int count,c,w,h,r,p,g;
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
     game_state *new;
+    int *old_guess;
+    int old_guess_size;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->new = new_state(gdd->params);
+    gdd->old_guess_size = 250;
+    gdd->old_guess = snewn(gdd->old_guess_size, int);
+
+    dd->desc = gdd->desc = snewn(10 + wh + 6 * (w + h), char);
+}
+
+static bool attempt_new_desc(desc_data *dd) {
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = dd->rs;
+    int count,c,w,h,r,p,g;
+    game_state *new = gdd->new;
 
     /* Variables for puzzle generation algorithm */
     int filling;
     int max_length;
     int count_ghosts, count_vampires, count_zombies;
-    bool abort;
     float ratio;
     
     /* Variables for solver algorithm */
     bool solved_iterative, solved_bruteforce, contains_inconsistency;
     int count_ambiguous;
     int iterative_depth;
-    int *old_guess;
+    int *old_guess = gdd->old_guess;
 
     /* Variables for game description generation */
     int x,y;
     char *e;
-    char *desc; 
+    char *desc = gdd->desc;
 
-    while (true) {
-        new = new_state(params);
-        abort = false;
+    bool solved = true;
+    {
+        new_state_reuse(params, new);
 
         /* Fill grid with random mirrors and (later to be populated)
          * empty monster cells */
@@ -1033,16 +1071,14 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         /* Puzzle is boring if it has too few monster cells. Discard
          * grid, make new grid */
         if (new->common->num_total <= 4) {
-            free_game(new);
-            continue;
+            solved = false;
         }
 
         /* Monsters / Mirrors ratio should be balanced */
         ratio = (float)new->common->num_total /
             (float)(new->common->params.w * new->common->params.h);
         if (ratio < 0.48F || ratio > 0.78F) {
-            free_game(new);
-            continue;
+            solved = false;
         }        
 
         /* Assign clue identifiers */   
@@ -1088,12 +1124,9 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 
         for (p=0;p<new->common->num_paths;p++) {
             if (new->common->paths[p].num_monsters > max_length) {
-                abort = true;
+                solved = false;
+                break;
             }
-        }
-        if (abort) {
-            free_game(new);
-            continue;
         }
 
         qsort(new->common->paths, new->common->num_paths,
@@ -1125,11 +1158,11 @@ static char *new_game_desc(const game_params *params, random_state *rs,
             count++;
         }
 
-        /* Fill any remaining ambiguous entries with random monsters */ 
+        /* Fill any remaining ambiguous entries with random monsters */
         for(g=0;g<new->common->num_total;g++) {
             if (new->guess[g] == 7) {
                 r = random_upto(rs,3);
-                new->guess[g] = (r == 0) ? 1 : ( (r == 1) ? 2 : 4 );        
+                new->guess[g] = (r == 0) ? 1 : ( (r == 1) ? 2 : 4 );
             }
         }
 
@@ -1141,17 +1174,15 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         if ((new->common->num_ghosts == 0 && new->common->num_vampires == 0) ||
             (new->common->num_ghosts == 0 && new->common->num_zombies == 0) ||
             (new->common->num_vampires == 0 && new->common->num_zombies == 0)) {
-            free_game(new);
-            continue;
+            solved = false;
         }
 
         /* Discard puzzle if difficulty Tricky, and it has only 1
          * member of any monster type */
-        if (new->common->params.diff == DIFF_TRICKY && 
+        if (new->common->params.diff == DIFF_TRICKY &&
             (new->common->num_ghosts <= 1 ||
              new->common->num_vampires <= 1 || new->common->num_zombies <= 1)) {
-            free_game(new);
-            continue;
+            solved = false;
         }
 
         for (w=1;w<new->common->params.w+1;w++)
@@ -1160,18 +1191,18 @@ static char *new_game_desc(const game_params *params, random_state *rs,
                 if (c >= 0) {
                     if (new->guess[c] == 1) new->common->grid[w+h*(new->common->params.w+2)] = CELL_GHOST;
                     if (new->guess[c] == 2) new->common->grid[w+h*(new->common->params.w+2)] = CELL_VAMPIRE;
-                    if (new->guess[c] == 4) new->common->grid[w+h*(new->common->params.w+2)] = CELL_ZOMBIE;                 
+                    if (new->guess[c] == 4) new->common->grid[w+h*(new->common->params.w+2)] = CELL_ZOMBIE;
                 }
             }
 
-        /* Prepare path information needed by the solver (containing all hints) */  
+        /* Prepare path information needed by the solver (containing all hints) */
         for (p=0;p<new->common->num_paths;p++) {
             bool mirror;
             int x,y;
 
             new->common->paths[p].sightings_start = 0;
             new->common->paths[p].sightings_end = 0;
-            
+
             mirror = false;
             for (g=0;g<new->common->paths[p].length;g++) {
 
@@ -1204,7 +1235,10 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         }
 
         /* Try to solve the puzzle with the iterative solver */
-        old_guess = snewn(new->common->num_total,int);
+        if (new->common->num_total > gdd->old_guess_size) {
+            gdd->old_guess_size = new->common->num_total;
+            gdd->old_guess = old_guess = sresize(gdd->old_guess, gdd->old_guess_size, int);
+        }
         for (p=0;p<new->common->num_total;p++) {
             new->guess[p] = 7;
             old_guess[p] = 7;
@@ -1217,17 +1251,17 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         while (true) {
             bool no_change = true;
             solved_iterative = solve_iterative(new,new->common->paths);
-            iterative_depth++;      
+            iterative_depth++;
             for (p=0;p<new->common->num_total;p++) {
                 if (new->guess[p] != old_guess[p]) no_change = false;
                 old_guess[p] = new->guess[p];
                 if (new->guess[p] == 0) contains_inconsistency = true;
             }
             if (solved_iterative || no_change) break;
-        } 
+        }
 
         /* If necessary, try to solve the puzzle with the brute-force solver */
-        solved_bruteforce = false;  
+        solved_bruteforce = false;
         if (new->common->params.diff != DIFF_EASY &&
             !solved_iterative && !contains_inconsistency) {
             for (p=0;p<new->common->num_total;p++)
@@ -1235,39 +1269,32 @@ static char *new_game_desc(const game_params *params, random_state *rs,
                     new->guess[p] != 4) count_ambiguous++;
 
             solved_bruteforce = solve_bruteforce(new, new->common->paths);
-        }   
-
-        /*  Determine puzzle difficulty level */    
-        if (new->common->params.diff == DIFF_EASY && solved_iterative &&
-            iterative_depth <= 3 && !contains_inconsistency) { 
-/*          printf("Puzzle level: EASY Level %d Ratio %f Ambiguous %d (Found after %i tries)\n",iterative_depth, ratio, count_ambiguous, i); */
-            break;
         }
 
-        if (new->common->params.diff == DIFF_NORMAL &&
-            ((solved_iterative && iterative_depth > 3) ||
-             (solved_bruteforce && count_ambiguous < 4)) &&
-            !contains_inconsistency) {  
-/*          printf("Puzzle level: NORMAL Level %d Ratio %f Ambiguous %d (Found after %d tries)\n", iterative_depth, ratio, count_ambiguous, i); */
-            break;
+        if (solved) {
+            /*  Determine puzzle difficulty level */
+            if (new->common->params.diff == DIFF_EASY && solved_iterative &&
+                iterative_depth <= 3 &&
+                !contains_inconsistency) {
+                /*          printf("Puzzle level: EASY Level %d Ratio %f Ambiguous %d (Found after %i tries)\n",iterative_depth, ratio, count_ambiguous, i); */
+            } else if (new->common->params.diff == DIFF_NORMAL &&
+                ((solved_iterative && iterative_depth > 3) ||
+                (solved_bruteforce && count_ambiguous < 4)) &&
+                !contains_inconsistency) {
+                /*          printf("Puzzle level: NORMAL Level %d Ratio %f Ambiguous %d (Found after %d tries)\n", iterative_depth, ratio, count_ambiguous, i); */
+            } else if (new->common->params.diff == DIFF_TRICKY &&
+                solved_bruteforce &&
+                iterative_depth > 0 &&
+                count_ambiguous >= 4 &&
+                !contains_inconsistency) {
+                /*          printf("Puzzle level: TRICKY Level %d Ratio %f Ambiguous %d (Found after %d tries)\n", iterative_depth, ratio, count_ambiguous, i); */
+            } else {
+                solved = false;
+            }
         }
-        if (new->common->params.diff == DIFF_TRICKY &&
-            solved_bruteforce && iterative_depth > 0 &&
-            count_ambiguous >= 4 && !contains_inconsistency) {
-/*          printf("Puzzle level: TRICKY Level %d Ratio %f Ambiguous %d (Found after %d tries)\n", iterative_depth, ratio, count_ambiguous, i); */
-            break;
-        }
-
-        /* If puzzle is not solvable or does not satisfy the desired
-         * difficulty level, free memory and start from scratch */    
-        sfree(old_guess);
-        free_game(new);
     }
     
     /* We have a valid puzzle! */
-    
-    desc = snewn(10 + new->common->wh +
-                 6*(new->common->params.w + new->common->params.h), char);
     e = desc;
 
     /* Encode monster counts */
@@ -1307,12 +1334,36 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     }
 
     *e++ = '\0';
-    desc = sresize(desc, e - desc, char);
 
-    sfree(old_guess);
-    free_game(new);
+    return solved;
+}
 
-    return desc;
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    free_game(gdd->new);
+    sfree(gdd->old_guess);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static void num2grid(int num, int width, int height, int *x, int *y) {
@@ -2853,4 +2904,7 @@ const struct game thegame = {
     false,                 /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,                     /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };

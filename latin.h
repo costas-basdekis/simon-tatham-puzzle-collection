@@ -115,9 +115,11 @@ void latin_solver_debug(unsigned char *cube, int o);
 /* --- Generation and checking --- */
 
 digit *latin_generate(int o, random_state *rs);
+digit *latin_generate_reuse(int o, random_state *rs, digit *existing_sq);
 
 /* The order of the latin rectangle is max(w,h). */
 digit *latin_generate_rect(int w, int h, random_state *rs);
+digit *latin_generate_rect_reuse(int w, int h, random_state *rs, digit *existing_rect, digit *existing_latin);
 
 bool latin_check(digit *sq, int order); /* true => not a latin square */
 

@@ -836,11 +836,13 @@ struct solver_scratch {
     int depth;
 };
 
-static struct solver_scratch *new_scratch(int *graph, int n, int ngraph)
+static struct solver_scratch *new_scratch_reuse(int *graph, int n, int ngraph, struct solver_scratch *existing_sc)
 {
-    struct solver_scratch *sc;
+    struct solver_scratch *sc = existing_sc;
 
-    sc = snew(struct solver_scratch);
+    if (!sc) {
+        sc = snew(struct solver_scratch);
+    }
     sc->graph = graph;
     sc->n = n;
     sc->ngraph = ngraph;
@@ -853,6 +855,11 @@ static struct solver_scratch *new_scratch(int *graph, int n, int ngraph)
 #endif
 
     return sc;
+}
+
+static struct solver_scratch *new_scratch(int *graph, int n, int ngraph)
+{
+    return new_scratch_reuse(graph, n, ngraph, NULL);
 }
 
 static void free_scratch(struct solver_scratch *sc)
@@ -1401,32 +1408,39 @@ static int map_solver(struct solver_scratch *sc,
  * Game generation main function.
  */
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    int *map;
+    int *graph;
+    int *colouring;
+    int *colouring2;
+    int *regions;
+    struct solver_scratch* sc;
+    int mindiff;
+    int tries;
+    char *buf;
+    int desc_size;
+    char *desc;
+    int aux_size;
+    char *aux;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
-    struct solver_scratch *sc = NULL;
-    int *map, *graph, ngraph, *colouring, *colouring2, *regions;
-    int i, j, w, h, n, solveret, cfreq[FOUR];
-    int wh;
-    int mindiff, tries;
-#ifdef GENERATION_DIAGNOSTICS
-    int x, y;
-#endif
-    char *ret, buf[80];
-    int retlen, retsize;
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
 
-    w = params->w;
-    h = params->h;
-    n = params->n;
-    wh = w*h;
+    int w = dd->params->w, h = dd->params->h, n = dd->params->n, wh = w * h;
 
-    *aux = NULL;
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
 
-    map = snewn(wh, int);
-    graph = snewn(n*n, int);
-    colouring = snewn(n, int);
-    colouring2 = snewn(n, int);
-    regions = snewn(n, int);
+    gdd->map = snewn(wh, int);
+    gdd->graph = snewn(n*n, int);
+    gdd->colouring = snewn(n, int);
+    gdd->colouring2 = snewn(n, int);
+    gdd->regions = snewn(n, int);
+    gdd->sc = snew(struct solver_scratch);
 
     /*
      * This is the minimum difficulty below which we'll completely
@@ -1437,10 +1451,30 @@ static char *new_game_desc(const game_params *params, random_state *rs,
      * desired difficulty, so we will eventually drop this down to
      * -1 to indicate that any old map will do.
      */
-    mindiff = params->diff;
-    tries = 50;
+    gdd->mindiff = gdd->params->diff;
+    gdd->tries = 50;
 
-    while (1) {
+    gdd->buf = snewn(80, char);
+    gdd->desc_size = 256;
+    dd->desc = gdd->desc = snewn(gdd->desc_size, char);
+    gdd->aux_size = 256;
+    dd->aux = gdd->aux = snewn(gdd->aux_size, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    struct solver_scratch *sc = gdd->sc;
+    int *map = gdd->map, *graph = gdd->graph, ngraph, *colouring = gdd->colouring, *colouring2 = gdd->colouring2, *regions = gdd->regions;
+    int i, j, w = gdd->params->w, h = gdd->params->h, n = gdd->params->n, solveret, cfreq[FOUR];
+    int wh = w * h;
+#ifdef GENERATION_DIAGNOSTICS
+    int x, y;
+#endif
+
+    bool solved = true;
+    {
 
         /*
          * Create the map.
@@ -1500,25 +1534,21 @@ static char *new_game_desc(const game_params *params, random_state *rs,
         /*
          * Encode the solution as an aux string.
          */
-        if (*aux)                      /* in case we've come round again */
-            sfree(*aux);
-        retlen = retsize = 0;
-        ret = NULL;
+        int aux_len = 0;
         for (i = 0; i < n; i++) {
             int len;
 
             if (colouring[i] < 0)
                 continue;
 
-            len = sprintf(buf, "%s%d:%d", i ? ";" : "S;", colouring[i], i);
-            if (retlen + len >= retsize) {
-                retsize = retlen + len + 256;
-                ret = sresize(ret, retsize, char);
+            len = sprintf(gdd->buf, "%s%d:%d", i ? ";" : "S;", colouring[i], i);
+            if (aux_len + len >= gdd->aux_size) {
+                gdd->aux_size = aux_len + len + 256;
+                dd->aux = gdd->aux = sresize(gdd->aux, gdd->aux_size, char);
             }
-            strcpy(ret + retlen, buf);
-            retlen += len;
+            strcpy(gdd->aux + aux_len, gdd->buf);
+            aux_len += len;
         }
-        *aux = ret;
 
         /*
          * Remove the region colours one by one, keeping
@@ -1538,8 +1568,7 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 
         shuffle(regions, n, sizeof(*regions), rs);
 
-        if (sc) free_scratch(sc);
-        sc = new_scratch(graph, n, ngraph);
+        new_scratch_reuse(graph, n, ngraph, sc);
 
         for (i = 0; i < n; i++) {
             j = regions[i];
@@ -1550,7 +1579,7 @@ static char *new_game_desc(const game_params *params, random_state *rs,
             memcpy(colouring2, colouring, n*sizeof(int));
             colouring2[j] = -1;
             solveret = map_solver(sc, graph, n, ngraph, colouring2,
-				  params->diff);
+				  gdd->params->diff);
             assert(solveret >= 0);	       /* mustn't be impossible! */
             if (solveret == 1) {
                 cfreq[colouring[j]]--;
@@ -1582,18 +1611,16 @@ static char *new_game_desc(const game_params *params, random_state *rs,
          */
         memcpy(colouring2, colouring, n*sizeof(int));
         if (map_solver(sc, graph, n, ngraph, colouring2,
-                       mindiff - 1) == 1) {
+                       gdd->mindiff - 1) == 1) {
 	    /*
 	     * Drop minimum difficulty if necessary.
 	     */
-	    if (mindiff > 0 && (n < 9 || n > 2*wh/3)) {
-		if (tries-- <= 0)
-		    mindiff = 0;       /* give up and go for Easy */
+	    if (gdd->mindiff > 0 && (n < 9 || n > 2*wh/3)) {
+		if (gdd->tries-- <= 0)
+		    gdd->mindiff = 0;       /* give up and go for Easy */
 	    }
-            continue;
+            solved = false;
 	}
-
-        break;
     }
 
     /*
@@ -1609,8 +1636,7 @@ static char *new_game_desc(const game_params *params, random_state *rs,
      * 	  fashion (digits 0-3 interspersed with letters giving
      * 	  lengths of runs of empty spaces).
      */
-    retlen = retsize = 0;
-    ret = NULL;
+    int desc_len = 0;
 
     {
 	int run;
@@ -1642,15 +1668,15 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 		dy = 0;
 	    }
 
-	    if (retlen + 10 >= retsize) {
-		retsize = retlen + 256;
-		ret = sresize(ret, retsize, char);
+	    if (desc_len + 10 >= gdd->desc_size) {
+		gdd->desc_size = desc_len + 256;
+		dd->desc = gdd->desc = sresize(gdd->desc, gdd->desc_size, char);
 	    }
 
 	    v = (map[y*w+x] != map[(y+dy)*w+(x+dx)]);
 
 	    if (pv != v) {
-		ret[retlen++] = 'a'-1 + run;
+		gdd->desc[desc_len++] = 'a'-1 + run;
 		run = 1;
 		pv = v;
 	    } else {
@@ -1662,25 +1688,25 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 		 * more than 26.
 		 */
 		if (run == 25) {
-		    ret[retlen++] = 'z';
+		    gdd->desc[desc_len++] = 'z';
 		    run = 0;
 		}
 		run++;
 	    }
 	}
 
-        if (retlen + 10 >= retsize) {
-            retsize = retlen + 256;
-            ret = sresize(ret, retsize, char);
+        if (desc_len + 10 >= gdd->desc_size) {
+            gdd->desc_size = desc_len + 256;
+            dd->desc = gdd->desc = sresize(gdd->desc, gdd->desc_size, char);
         }
-	ret[retlen++] = 'a'-1 + run;
-	ret[retlen++] = ',';
+	gdd->desc[desc_len++] = 'a'-1 + run;
+	gdd->desc[desc_len++] = ',';
 
 	run = 0;
 	for (i = 0; i < n; i++) {
-	    if (retlen + 10 >= retsize) {
-		retsize = retlen + 256;
-		ret = sresize(ret, retsize, char);
+	    if (desc_len + 10 >= gdd->desc_size) {
+		gdd->desc_size = desc_len + 256;
+		dd->desc = gdd->desc = sresize(gdd->desc, gdd->desc_size, char);
 	    }
 
 	    if (colouring[i] < 0) {
@@ -1690,32 +1716,60 @@ static char *new_game_desc(const game_params *params, random_state *rs,
 		 * Confusingly different, but more compact.
 		 */
 		if (run == 26) {
-		    ret[retlen++] = 'z';
+		    gdd->desc[desc_len++] = 'z';
 		    run = 0;
 		}
 		run++;
 	    } else {
 		if (run > 0)
-		    ret[retlen++] = 'a'-1 + run;
-		ret[retlen++] = '0' + colouring[i];
+		    gdd->desc[desc_len++] = 'a'-1 + run;
+		gdd->desc[desc_len++] = '0' + colouring[i];
 		run = 0;
 	    }
 	}
 	if (run > 0)
-	    ret[retlen++] = 'a'-1 + run;
-	ret[retlen] = '\0';
+	    gdd->desc[desc_len++] = 'a'-1 + run;
+	gdd->desc[desc_len] = '\0';
 
-	assert(retlen < retsize);
+	assert(desc_len < gdd->desc_size);
     }
 
-    free_scratch(sc);
-    sfree(regions);
-    sfree(colouring2);
-    sfree(colouring);
-    sfree(graph);
-    sfree(map);
+    return solved;
+}
 
-    return ret;
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->map);
+    sfree(gdd->graph);
+    sfree(gdd->colouring);
+    sfree(gdd->colouring2);
+    sfree(gdd->regions);
+
+    sfree(gdd->buf);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *parse_edge_list(const game_params *params,
@@ -3363,6 +3417,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER

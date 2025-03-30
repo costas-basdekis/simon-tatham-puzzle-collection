@@ -687,51 +687,97 @@ static square *find_clues(const game_state *state, int *ret_nclues)
  * the end, and if you only add one, it's ambiguous where).
  */
 
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    game_state *state;
+    int* shuffle_1toN;
+    int desc_size;
+    char *desc;
+} game_desc_data;
+
 /* forward declarations of internal calls */
 static void newdesc_choose_black_squares(game_state *state,
                                          const int *shuffle_1toN);
 static void newdesc_compute_clues(game_state *state);
 static int newdesc_strip_clues(game_state *state, int *shuffle_1toN);
-static char *newdesc_encode_game_description(int n, puzzle_size *grid);
+static char *newdesc_encode_game_description(desc_data *dd);
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->state = snew(game_state);
+    gdd->state->params = *gdd->params;
+    gdd->state->grid = snewn(wh, puzzle_size);
+    gdd->shuffle_1toN = snewn(wh, int);
+    for (int i = 0; i < wh; ++i) gdd->shuffle_1toN[i] = i;
+
+    gdd->desc_size = wh + 1;
+    dd->desc = gdd->desc = snewn(gdd->desc_size, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
+    int const w = params->w, h = params->h, n = w * h;
+    int * shuffle_1toN = gdd->shuffle_1toN;
+
+    int clues_removed;
+
+    bool solved = true;
+    {
+        shuffle(shuffle_1toN, n, sizeof (int), rs);
+        newdesc_choose_black_squares(gdd->state, shuffle_1toN);
+
+        newdesc_compute_clues(gdd->state);
+
+        shuffle(shuffle_1toN, n, sizeof (int), rs);
+        clues_removed = newdesc_strip_clues(gdd->state, shuffle_1toN);
+
+        if (clues_removed < 0) solved = true;
+    }
+
+    newdesc_encode_game_description(dd);
+
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->state->grid);
+    sfree(gdd->state);
+    sfree(gdd->shuffle_1toN);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        dd->desc = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
 
 static char *new_game_desc(const game_params *params, random_state *rs,
                            char **aux, bool interactive)
 {
-    int const w = params->w, h = params->h, n = w * h;
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
 
-    puzzle_size *const grid = snewn(n, puzzle_size);
-    int *const shuffle_1toN = snewn(n, int);
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
 
-    int i, clues_removed;
+    *aux = dd.aux;
 
-    char *encoding;
-
-    game_state state;
-    state.params = *params;
-    state.grid = grid;
-
-    interactive = false; /* I don't need it, I shouldn't use it*/
-
-    for (i = 0; i < n; ++i) shuffle_1toN[i] = i;
-
-    while (true) {
-        shuffle(shuffle_1toN, n, sizeof (int), rs);
-        newdesc_choose_black_squares(&state, shuffle_1toN);
-
-        newdesc_compute_clues(&state);
-
-        shuffle(shuffle_1toN, n, sizeof (int), rs);
-        clues_removed = newdesc_strip_clues(&state, shuffle_1toN);
-
-        if (clues_removed < 0) continue; else break;
-    }
-
-    encoding = newdesc_encode_game_description(n, grid);
-
-    sfree(grid);
-    sfree(shuffle_1toN);
-
-    return encoding;
+    return dd.desc;
 }
 
 static int dfs_count_white(game_state *state, int cell);
@@ -1039,10 +1085,13 @@ static const char *validate_params(const game_params *params, bool full)
 
 #define NDIGITS_BASE '!'
 
-static char *newdesc_encode_game_description(int area, puzzle_size *grid)
+static char *newdesc_encode_game_description(desc_data *dd)
 {
-    char *desc = NULL;
-    int desclen = 0, descsize = 0;
+    game_desc_data *gdd = dd->game_desc_data;
+    int area = gdd->params->w * gdd->params->h;
+    puzzle_size *grid = gdd->state->grid;
+    char *desc = gdd->desc;
+    int desclen = 0;
     int run, i;
 
     run = 0;
@@ -1052,9 +1101,9 @@ static char *newdesc_encode_game_description(int area, puzzle_size *grid)
 	if (!n)
 	    run++;
 	else {
-	    if (descsize < desclen + 40) {
-		descsize = desclen * 3 / 2 + 40;
-		desc = sresize(desc, descsize, char);
+	    if (gdd->desc_size < desclen + 40) {
+		gdd->desc_size = desclen * 3 / 2 + 40;
+		dd->desc = gdd->desc = desc = sresize(desc, gdd->desc_size, char);
 	    }
 	    if (run) {
 		while (run > 0) {
@@ -1887,4 +1936,7 @@ struct game const thegame = {
     false, /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0, /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };

@@ -464,6 +464,7 @@ static bool game_can_format_as_text_now(const game_params *params)
     return true;
 }
 
+static char *encode_game_reuse(const game_state *state, char *existing_desc);
 static char *encode_game(const game_state *state);
 
 static char *game_text_format(const game_state *state)
@@ -983,9 +984,12 @@ static void clear_game(game_state *state, bool cleardots)
     if (cleardots) game_update_dots(state);
 }
 
-static game_state *dup_game(const game_state *state)
+static game_state *dup_game_reuse(const game_state *state, game_state *into)
 {
-    game_state *ret = blank_game(state->w, state->h);
+    game_state *ret = into;
+    if (!ret) {
+        ret = blank_game(state->w, state->h);
+    }
 
     ret->completed = state->completed;
     ret->used_solve = state->used_solve;
@@ -999,6 +1003,11 @@ static game_state *dup_game(const game_state *state)
     ret->cdiff = state->cdiff;
 
     return ret;
+}
+
+static game_state *dup_game(const game_state *state)
+{
+    return dup_game_reuse(state, NULL);
 }
 
 static void free_game(game_state *state)
@@ -1016,15 +1025,17 @@ static void free_game(game_state *state)
  * an edit mode.
  */
 
-static char *encode_game(const game_state *state)
+static char *encode_game_reuse(const game_state *state, char *existing_desc)
 {
-    char *desc, *p;
+    char *desc = existing_desc, *p;
     int run, x, y, area;
     unsigned int f;
 
     area = (state->sx-2) * (state->sy-2);
 
-    desc = snewn(area, char);
+    if (desc == NULL) {
+        desc = snewn(area, char);
+    }
     p = desc;
     run = 0;
     for (y = 1; y < state->sy-1; y++) {
@@ -1050,9 +1061,16 @@ static char *encode_game(const game_state *state)
     }
     assert(p - desc < area);
     *p++ = '\0';
-    desc = sresize(desc, p - desc, char);
+    if (!existing_desc) {
+        desc = sresize(desc, p - desc, char);
+    }
 
     return desc;
+}
+
+static char *encode_game(const game_state *state)
+{
+    return encode_game_reuse(state, NULL);
 }
 
 struct movedot {
@@ -1442,18 +1460,44 @@ static int measure_wiggliness(const game_state *state, int *scratch)
     return nwiggles;
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
-{
-    game_state *state = blank_game(params->w, params->h), *copy;
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    game_state *blank;
+    game_state *state;
+    game_state *copy;
+    int *scratch;
+    char *aux;
     char *desc;
-    int *scratch, sz = state->sx*state->sy, i;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->blank = blank_game(w, h);
+    gdd->state = blank_game(w, h);
+    gdd->copy = blank_game(w, h);
+    gdd->scratch = snewn(gdd->state->sx * gdd->state->sy, int);
+
+    dd->desc = gdd->desc = snewn((gdd->state->sx - 2) * (gdd->state->sy - 2), char);
+    dd->aux = gdd->aux = NULL;
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    game_state *state = gdd->state, *copy;
+    int *scratch = gdd->scratch, i;
     int diff, best_wiggliness;
     bool cc;
 
-    scratch = snewn(sz, int);
-
-generate:
     best_wiggliness = -1;
     copy = NULL;
     for (i = 0; i < GENERATE_TRIES; i++) {
@@ -1469,16 +1513,13 @@ generate:
         debug(("Grid gen #%d: wiggliness=%d", i, this_wiggliness));
         if (this_wiggliness > best_wiggliness) {
             best_wiggliness = this_wiggliness;
-            if (copy)
-                free_game(copy);
-            copy = dup_game(state);
+            copy = dup_game_reuse(state, gdd->copy);
             debug((" new best"));
         }
         debug(("\n"));
     }
     assert(copy);
-    free_game(state);
-    state = copy;
+    dup_game_reuse(copy, state);
 
 #ifdef DEBUGGING
     {
@@ -1494,14 +1535,14 @@ generate:
     cc = check_complete(state, NULL, NULL);
     assert(cc);
 
-    copy = dup_game(state);
+    dup_game_reuse(state, copy);
     clear_game(copy, false);
     dbg_state(copy);
-    diff = solver_state(copy, params->diff);
-    free_game(copy);
+    diff = solver_state(copy, gdd->params->diff);
 
     assert(diff != DIFF_IMPOSSIBLE);
-    if (diff != params->diff) {
+    bool solved = true;
+    if (diff != gdd->params->diff) {
         /*
          * If the puzzle was insoluble at this difficulty level (i.e.
          * too hard), _or_ soluble at a lower level (too easy), go
@@ -1513,7 +1554,7 @@ generate:
 #ifdef STANDALONE_SOLVER
         if (!one_try)
 #endif
-            goto generate;
+            solved = false;
     }
 
 #ifdef STANDALONE_PICTURE_GENERATOR
@@ -1648,7 +1689,7 @@ generate:
 	     * if the resulting puzzle turns out to have become
 	     * insoluble.
 	     */
-	    copy2 = dup_game(state);
+	    copy2 = dup_game_reuse(state);
 
 	    remove_dot(d0);
 	    remove_dot(d1);
@@ -1666,38 +1707,63 @@ generate:
 		}
 	    }
 
-	    copy = dup_game(state);
+	    dup_game_reuse(state, copy);
 	    clear_game(copy, false);
 	    dbg_state(copy);
 	    newdiff = solver_state(copy, params->diff);
-	    free_game(copy);
 	    if (diff == newdiff) {
 		/* Still just as soluble. Let the merge stand. */
-		free_game(copy2);
 	    } else {
 		/* Became insoluble. Revert. */
-		free_game(state);
-		state = copy2;
+		dup_game_reuse(copy2, state);
 	    }
+		free_game(copy2);
 	}
         sfree(posns);
     }
 #endif
 
-    desc = encode_game(state);
+    encode_game_reuse(state, gdd->desc);
 #ifndef STANDALONE_SOLVER
     debug(("new_game_desc generated: \n"));
     dbg_state(state);
 #endif
 
-    game_state *blank = blank_game(params->w, params->h);
-    *aux = diff_game(blank, state, true, -1);
-    free_game(blank);
+    gdd->aux = diff_game(gdd->blank, state, true, -1);
 
-    free_game(state);
-    sfree(scratch);
+    return solved;
+}
 
-    return desc;
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    free_game(gdd->blank);
+    free_game(gdd->state);
+    free_game(gdd->copy);
+    sfree(gdd->scratch);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+               char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static bool dots_too_close(game_state *state)
@@ -4162,6 +4228,9 @@ const struct game thegame = {
 #endif
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON,		       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER

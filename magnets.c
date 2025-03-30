@@ -571,10 +571,14 @@ static game_state *new_game(midend *me, const game_params *params,
     return st;
 }
 
-static char *generate_desc(game_state *new)
+static char *generate_desc(game_state *new, char *existing_desc)
 {
     int x, y, idx, other, w = new->w, h = new->h;
-    char *desc = snewn(new->wh + 2*(w + h) + 5, char), *p = desc;
+    char *desc = existing_desc;
+    if (!desc) {
+        desc = snewn(new->wh + 2*(w + h) + 5, char);
+    }
+    char *p = desc;
 
     for (x = 0; x < w; x++) *p++ = n2c(new->common->colcount[x*3+POSITIVE]);
     *p++ = ',';
@@ -1707,25 +1711,74 @@ static int check_difficulty(const game_params *params, game_state *new,
     return 0;
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux_r, bool interactive)
-{
-    game_state *new = new_state(params->w, params->h);
-    char *desc, *aux = snewn(new->wh+1, char);
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    game_state *new;
+    char *aux;
+    char *desc;
+} game_desc_data;
 
-    do {
-        gen_game(new, rs);
-        generate_aux(new, aux);
-    } while (check_difficulty(params, new, rs) < 0);
+static void initialise_desc_data(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->new = new_state(w, h);
+
+    dd->aux = gdd->aux = snewn(wh + 1, char);
+    dd->desc = gdd->desc = snewn(wh + 2 * (w + h) + 5, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    random_state *rs = gdd->rs;
+    game_state *new = gdd->new;
+    char *desc = gdd->desc, *aux = gdd->aux;
+
+    gen_game(new, rs);
+    generate_aux(new, aux);
+    bool solved = check_difficulty(gdd->params, new, rs) >= 0;
 
     /* now we're complete, generate the description string
      * and an aux_info for the completed game. */
-    desc = generate_desc(new);
+    generate_desc(new, desc);
 
-    free_game(new);
+    return solved;
+}
 
-    *aux_r = aux;
-    return desc;
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    free_game(gdd->new);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 struct game_ui {
@@ -2482,6 +2535,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     REQUIRE_RBUTTON,		       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER
@@ -2551,7 +2607,7 @@ static void start_soak(game_params *p, random_state *rs)
                 nn_tricky += nn;
             }
         } else if (ret < 0) {
-            char *desc = generate_desc(s);
+            char *desc = generate_desc(s, NULL);
             solve_from_aux(s, aux);
             printf("Game considered impossible:\n  %dx%d:%s\n",
                     p->w, p->h, desc);

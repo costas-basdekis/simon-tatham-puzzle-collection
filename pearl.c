@@ -1194,12 +1194,47 @@ static void pearl_loopgen(int w, int h, char *lines, random_state *rs, grid *g)
 #endif
 }
 
-static int new_clues(const game_params *params, random_state *rs,
-                     char *clues, char *grid_out)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    grid *g;
+    char *grid_out;
+    char *clues;
+    int ngen;
+    int *cluespace;
+    char *desc;
+    char *aux;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h;
+
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
+
+    gdd->g = grid_new(GRID_SQUARE, w-1, h-1, NULL);
+    gdd->grid_out = snewn(wh, char);
+    gdd->clues = snewn(wh, char);
+    gdd->cluespace = snewn(w*h, int);
+
+    gdd->ngen = 0;
+
+    dd->desc = gdd->desc = snewn(wh + 1, char);
+    dd->aux = gdd->aux = snewn(wh + 1, char);
+}
+
+static bool new_clues_iterative(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
+    random_state *rs = gdd->rs;
     int w = params->w, h = params->h, diff = params->difficulty;
-    int ngen = 0, x, y, d, ret, i;
-    grid *g = grid_new(GRID_SQUARE, w-1, h-1, NULL);
+    char *grid_out = gdd->grid_out, *clues = gdd->clues;
+    int x, y, d, ret, i;
+    grid *g = gdd->g;
 
     /*
      * Difficulty exception: 5x5 Tricky is not generable (the
@@ -1208,8 +1243,9 @@ static int new_clues(const game_params *params, random_state *rs,
     if (w == 5 && h == 5 && diff > DIFF_EASY)
         diff = DIFF_EASY;
 
-    while (1) {
-        ngen++;
+    bool solved = true;
+    {
+        gdd->ngen++;
 	pearl_loopgen(w, h, grid_out, rs, g);
 
 #ifdef GENERATION_DIAGNOSTICS
@@ -1283,7 +1319,7 @@ static int new_clues(const game_params *params, random_state *rs,
 #endif
 
         if (!params->nosolve) {
-            int *cluespace, *straights, *corners;
+            int *cluespace = gdd->cluespace, *straights, *corners;
             int nstraights, ncorners, nstraightpos, ncornerpos;
 
             /*
@@ -1292,7 +1328,7 @@ static int new_clues(const game_params *params, random_state *rs,
             ret = pearl_solve(w, h, clues, grid_out, diff, false);
             assert(ret > 0);	       /* shouldn't be inconsistent! */
             if (ret != 1)
-                continue;		       /* go round and try again */
+                solved = false;		       /* go round and try again */
 
             /*
              * Check this puzzle isn't too easy.
@@ -1301,7 +1337,7 @@ static int new_clues(const game_params *params, random_state *rs,
                 ret = pearl_solve(w, h, clues, grid_out, diff-1, false);
                 assert(ret > 0);
                 if (ret == 1)
-                    continue; /* too easy: try again */
+                    solved = false; /* too easy: try again */
             }
 
             /*
@@ -1321,7 +1357,6 @@ static int new_clues(const game_params *params, random_state *rs,
              * have tried and failed to remove are counted by the
              * former but not the latter.)
              */
-            cluespace = snewn(w*h, int);
             straights = cluespace;
             nstraightpos = 0;
             for (i = 0; i < w*h; i++)
@@ -1370,7 +1405,6 @@ static int new_clues(const game_params *params, random_state *rs,
                 if (ret != 1)
                     clues[y*w+x] = clue;   /* oops, put it back again */
             }
-            sfree(cluespace);
         }
 
 #ifdef FINISHED_PUZZLE
@@ -1383,29 +1417,62 @@ static int new_clues(const game_params *params, random_state *rs,
 	}
 	printf("\n");
 #endif
-
-	break;			       /* got it */
     }
-    grid_free(g);
 
     debug(("%d %dx%d loops before finished puzzle.\n", ngen, w, h));
+
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    grid_free(gdd->g);
+    sfree(gdd->grid_out);
+    sfree(gdd->clues);
+    sfree(gdd->cluespace);
+
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->aux);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static int new_clues(const game_params *params, random_state *rs,
+                     char *clues, char *grid_out)
+{
+    desc_data dd = {params, rs, false, NULL, NULL};
+    initialise_desc_data(&dd);
+    game_desc_data *gdd = dd.game_desc_data;
+    char *old_clues = gdd->clues;
+    gdd->clues = clues;
+    char *old_grid_out = gdd->grid_out;
+    gdd->grid_out = grid_out;
+    while (!new_clues_iterative(&dd)) {}
+    gdd->clues = old_clues;
+    gdd->grid_out = old_grid_out;
+    int ngen = gdd->ngen;
+    destroy_desc_data(&dd, false);
 
     return ngen;
 }
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-			   char **aux, bool interactive)
+static bool attempt_new_desc(desc_data *dd)
 {
-    char *grid, *clues;
+    game_desc_data *gdd = dd->game_desc_data;
+    const game_params *params = gdd->params;
     char *desc;
     int w = params->w, h = params->h, i, j;
 
-    grid = snewn(w*h, char);
-    clues = snewn(w*h, char);
+    new_clues_iterative(dd);
+    char *grid = gdd->grid_out, *clues = gdd->clues;
 
-    new_clues(params, rs, clues, grid);
-
-    desc = snewn(w * h + 1, char);
+    desc = gdd->desc;
     for (i = j = 0; i < w*h; i++) {
         if (clues[i] == NOCLUE && j > 0 &&
             desc[j-1] >= 'a' && desc[j-1] < 'z')
@@ -1419,15 +1486,25 @@ static char *new_game_desc(const game_params *params, random_state *rs,
     }
     desc[j] = '\0';
 
-    *aux = snewn(w*h+1, char);
     for (i = 0; i < w*h; i++)
-        (*aux)[i] = (grid[i] < 10) ? (grid[i] + '0') : (grid[i] + 'A' - 10);
-    (*aux)[w*h] = '\0';
+        (gdd->aux)[i] = (grid[i] < 10) ? (grid[i] + '0') : (grid[i] + 'A' - 10);
+    (gdd->aux)[w*h] = '\0';
 
-    sfree(grid);
-    sfree(clues);
+    return true;
+}
 
-    return desc;
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -2800,6 +2877,9 @@ const struct game thegame = {
     false,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
 
 #ifdef STANDALONE_SOLVER

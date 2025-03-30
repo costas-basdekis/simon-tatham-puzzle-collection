@@ -449,17 +449,42 @@ static int find_gem_candidates(int w, int h, char *grid,
  * Grid generation code.
  */
 
-static char *gengrid(int w, int h, random_state *rs)
+typedef struct game_desc_data {
+	const game_params *params;
+	random_state *rs;
+	struct solver_scratch *scratch;
+	int maxdist_threshold;
+	int tries;
+	char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
+	game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
+
+	int w = dd->params->w, h = dd->params->h, wh = w * h;
+
+	gdd->params = dd->params;
+	gdd->rs = dd->rs;
+
+	gdd->scratch =  new_scratch(w, h);
+	gdd->maxdist_threshold = 2;
+	gdd->tries = 0;
+
+	dd->desc = gdd->desc = snewn(wh + 1, char);
+}
+
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+    int w = gdd->params->w, h = gdd->params->h;
+    random_state *rs = gdd->rs;
     int wh = w*h;
-    char *grid = snewn(wh+1, char);
-    struct solver_scratch *sc = new_scratch(w, h);
-    int maxdist_threshold, tries;
+    char *grid = gdd->desc;
+    struct solver_scratch *sc = gdd->scratch;
 
-    maxdist_threshold = 2;
-    tries = 0;
-
-    while (1) {
+    bool solved = true;
+    {
 	int i, j;
 	int possgems;
 	int *dist, *list, head, tail, maxdist;
@@ -490,7 +515,7 @@ static char *gengrid(int w, int h, random_state *rs)
 	 */
 	possgems = find_gem_candidates(w, h, grid, sc);
 	if (possgems < wh/5)
-	    continue;
+	    solved = false;
 
 	/*
 	 * We _could_ now select wh/5 of the POSSGEMs and set them
@@ -542,7 +567,9 @@ static char *gengrid(int w, int h, random_state *rs)
 		}
 	    }
 	}
-	assert(head == wh && tail == wh);
+        if (solved) {
+            assert(head == wh && tail == wh);
+        }
 
 	/*
 	 * Now abandon this grid and go round again if maxdist is
@@ -552,13 +579,13 @@ static char *gengrid(int w, int h, random_state *rs)
 	 * accumulate failed generation attempts, we gradually
 	 * raise it as we get more desperate.
 	 */
-	if (maxdist > maxdist_threshold) {
-	    tries++;
-	    if (tries == 50) {
-		maxdist_threshold++;
-		tries = 0;
+	if (maxdist > gdd->maxdist_threshold) {
+	    gdd->tries++;
+	    if (gdd->tries == 50) {
+		gdd->maxdist_threshold++;
+		gdd->tries = 0;
 	    }
-	    continue;
+	    solved = false;
 	}
 
 	/*
@@ -575,20 +602,38 @@ static char *gengrid(int w, int h, random_state *rs)
 	shuffle(list, j, sizeof(*list), rs);
 	for (i = 0; i < j; i++)
 	    grid[list[i]] = (i < wh/5 ? GEM : BLANK);
-	break;
     }
-
-    free_scratch(sc);
 
     grid[wh] = '\0';
 
-    return grid;
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+	game_desc_data *gdd = dd->game_desc_data;
+
+	free_scratch(gdd->scratch);
+	if (!keep_outputs) {
+		sfree(gdd->desc);
+		dd->desc = NULL;
+	}
+	sfree(gdd);
+	dd->game_desc_data = NULL;
 }
 
 static char *new_game_desc(const game_params *params, random_state *rs,
 			   char **aux, bool interactive)
 {
-    return gengrid(params->w, params->h, rs);
+	desc_data dd = {params, rs, interactive, *aux};
+	initialise_desc_data(&dd);
+
+	while (!attempt_new_desc(&dd)) {}
+	destroy_desc_data(&dd, true);
+
+	*aux = dd.aux;
+
+	return dd.desc;
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -2242,4 +2287,7 @@ const struct game thegame = {
     true,			       /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,				       /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
