@@ -625,73 +625,102 @@ static void init_borders(int w, int h, borderflag *borders)
 
 #define xshuffle(ptr, len, rs) shuffle((ptr), (len), sizeof (ptr)[0], (rs))
 
-static char *new_game_desc(const game_params *params, random_state *rs,
-                           char **aux, bool interactive)
+typedef struct game_desc_data {
+    const game_params *params;
+    random_state *rs;
+    clue *numbers;
+    borderflag *rim;
+    borderflag *scratch_borders;
+    char *soln;
+    int *shuf;
+    char *desc;
+} game_desc_data;
+
+static void initialise_desc_data(desc_data *dd)
 {
-    int w = params->w, h = params->h, wh = w*h, k = params->k;
+    game_desc_data *gdd = dd->game_desc_data = snew(game_desc_data);
 
-    clue *numbers = snewn(wh + 1, clue);
-    borderflag *rim = snewn(wh, borderflag);
-    borderflag *scratch_borders = snewn(wh, borderflag);
+    int w = dd->params->w, h = dd->params->h, wh = w * h, k = dd->params->k;
 
-    char *soln = snewa(*aux, wh + 2);
-    int *shuf = snewn(wh, int);
-    DSF *dsf = NULL;
-    int i, r, c;
+    gdd->params = dd->params;
+    gdd->rs = dd->rs;
 
-    for (i = 0; i < wh; ++i) shuf[i] = i;
-    xshuffle(shuf, wh, rs);
+    gdd->numbers = snewn(wh + 1, clue);
+    gdd->rim = snewn(wh, borderflag);
+    init_borders(w, h, gdd->rim);
+    gdd->scratch_borders = snewn(wh, borderflag);
 
-    init_borders(w, h, rim);
-
+    dd->aux = gdd->soln = snewa(dd->aux, wh + 2);
     assert (!('@' & BORDER_MASK));
-    *soln++ = 'S';
-    soln[wh] = '\0';
+    gdd->soln[0] = 'S';
+    gdd->soln[wh + 1] = '\0';
 
-    do {
-        setmem(soln, '@', wh);
+    gdd->shuf = snewn(wh, int);
+    for (int i = 0; i < wh; ++i) {
+        gdd->shuf[i] = i;
+    }
+    xshuffle(gdd->shuf, wh, gdd->rs);
 
-        dsf_free(dsf);
-        dsf = divvy_rectangle(w, h, k, rs);
+    dd->desc = gdd->desc = snewn(wh + 1, char);
+}
 
-        for (r = 0; r < h; ++r)
-            for (c = 0; c < w; ++c) {
-                int i = r * w + c, dir;
-                numbers[i] = 0;
-                for (dir = 0; dir < 4; ++dir) {
-                    int rr = r + dy[dir], cc = c + dx[dir], ii = rr * w + cc;
-                    if (OUT_OF_BOUNDS(cc, rr, w, h) ||
-                        !dsf_equivalent(dsf, i, ii)) {
-                        ++numbers[i];
-                        soln[i] |= BORDER(dir);
-                    }
+static bool attempt_new_desc(desc_data *dd)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    char *numbers = gdd->numbers;
+    borderflag *rim = gdd->rim;
+    borderflag *scratch_borders = gdd->scratch_borders;
+
+    char *soln = gdd->soln;
+    int *shuf = gdd->shuf;
+    DSF *dsf = NULL;
+
+    int w = dd->params->w, h = dd->params->h, wh = w * h, k = dd->params->k;
+
+    setmem(soln + 1, '@', wh);
+
+    dsf = divvy_rectangle(w, h, k, gdd->rs);
+
+    for (int r = 0; r < h; ++r) {
+        for (int c = 0; c < w; ++c) {
+            int i = r * w + c, dir;
+            numbers[i] = 0;
+            for (dir = 0; dir < 4; ++dir) {
+                int rr = r + dy[dir], cc = c + dx[dir], ii = rr * w + cc;
+                if (OUT_OF_BOUNDS(cc, rr, w, h) || !dsf_equivalent(dsf, i, ii)) {
+                    ++numbers[i];
+                    soln[i + 1] |= BORDER(dir);
                 }
             }
-
-        scopy(scratch_borders, rim, wh);
-    } while (!solver(params, numbers, scratch_borders));
-
-    for (i = 0; i < wh; ++i) {
-        int j = shuf[i];
-        clue copy = numbers[j];
-
-        scopy(scratch_borders, rim, wh);
-        numbers[j] = EMPTY; /* strip away unnecssary clues */
-        if (!solver(params, numbers, scratch_borders))
-            numbers[j] = copy;
+        }
     }
 
-    numbers[wh] = '\0';
-
-    sfree(scratch_borders);
-    sfree(rim);
-    sfree(shuf);
+    scopy(scratch_borders, rim, wh);
     dsf_free(dsf);
 
-    char *output = snewn(wh + 1, char), *p = output;
+    bool solved = solver(dd->params, numbers, scratch_borders);
 
-    r = 0;
-    for (i = 0; i < wh; ++i) {
+    /* Remove any unnecessary clues */
+    if (solved) {
+        for (int i = 0; i < wh; ++i) {
+            int j = shuf[i];
+            clue copy = numbers[j];
+
+            scopy(scratch_borders, rim, wh);
+            numbers[j] = EMPTY; /* strip away unnecssary clues */
+            if (!solver(gdd->params, numbers, scratch_borders)) {
+                numbers[j] = copy;
+            }
+        }
+
+        numbers[wh] = '\0';
+    }
+
+    /* Convert the clues into a description */
+    char *p = gdd->desc;
+    int r = 0;
+    for (int i = 0; i < wh; ++i) {
         if (numbers[i] != EMPTY) {
             while (r) {
                 while (r > 26) {
@@ -702,12 +731,45 @@ static char *new_game_desc(const game_params *params, random_state *rs,
                 r = 0;
             }
             *p++ = '0' + numbers[i];
-        } else ++r;
+        } else {
+            ++r;
+        }
     }
     *p++ = '\0';
 
-    sfree(numbers);
-    return sresize(output, p - output, char);
+    return solved;
+}
+
+static void destroy_desc_data(desc_data *dd, bool keep_outputs)
+{
+    game_desc_data *gdd = dd->game_desc_data;
+
+    sfree(gdd->scratch_borders);
+    sfree(gdd->rim);
+    sfree(gdd->shuf);
+    sfree(gdd->numbers);
+    if (!keep_outputs) {
+        sfree(gdd->desc);
+        sfree(gdd->soln);
+        dd->desc = NULL;
+        dd->aux = NULL;
+    }
+    sfree(gdd);
+    dd->game_desc_data = NULL;
+}
+
+static char *new_game_desc(const game_params *params, random_state *rs,
+                           char **aux, bool interactive)
+{
+    desc_data dd = {params, rs, interactive, *aux};
+    initialise_desc_data(&dd);
+
+    while (!attempt_new_desc(&dd)) {}
+    destroy_desc_data(&dd, true);
+
+    *aux = dd.aux;
+
+    return sresize(dd.desc, strlen(dd.desc) + 1, char);
 }
 
 static const char *validate_desc(const game_params *params, const char *desc)
@@ -1537,4 +1599,7 @@ const struct game thegame = {
     true,                                     /* wants_statusbar */
     false, NULL,                       /* timing_state */
     0,                                         /* flags */
+    initialise_desc_data,
+    attempt_new_desc,
+    destroy_desc_data
 };
